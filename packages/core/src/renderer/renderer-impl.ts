@@ -128,7 +128,7 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
    */
   function styledContent(styleLabel: string, content: string, tagName?: string): string {
     const tag = tagName ?? styleLabel
-    const className = `md-${styleLabel.replace(/_/g, `-`)}`
+    const className = `${styleLabel.replace(/_/g, `-`)}`
     const headingAttr = /^h\d$/.test(tag) ? ` data-heading="true"` : ``
     return `<${tag} class="${className}"${headingAttr}>${content}</${tag}>`
   }
@@ -296,7 +296,8 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
 
     image({ href, title, text }: Tokens.Image): string {
       const subText = styledContent(`figcaption`, transform(opts.legend!, text, title))
-      return `<figure><img src="${href}" title="${title}" alt="${text}"/>${subText}</figure>`
+      const titleAttr = title ? ` title="${title}"` : ``
+      return `<figure><img src="${href}"${titleAttr} alt="${text}"/>${subText}</figure>`
     },
 
     link({ href, title, text, tokens }: Tokens.Link): string {
