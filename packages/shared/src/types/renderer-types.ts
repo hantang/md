@@ -1,22 +1,32 @@
-import type { ReadTimeResults } from 'reading-time'
+import type { ReadTimeResults } from '../utils/readingTime'
 import type { IOpts } from './common'
+import type { FrontMatterData } from './front-matter'
+
+export interface CollectedHeading {
+  level: number
+  text: string
+}
 
 export interface RendererAPI {
-  /* —— 生命周期 —— */
+  /* Lifecycle */
   reset: (newOpts: Partial<IOpts>) => void
   setOptions: (newOpts: Partial<IOpts>) => void
   getOpts: () => IOpts
 
-  /* —— Markdown 处理 —— */
+  /* Markdown */
   parseFrontMatterAndContent: (markdown: string) => {
-    yamlData: Record<string, any>
+    yamlData: FrontMatterData
     markdownContent: string
     readingTime: ReadTimeResults
   }
+  renderMarkdownToHtml: (markdown: string) => string
 
-  /* —— HTML 拼装 —— */
+  /* HTML assembly */
   buildReadingTime: (reading: ReadTimeResults) => string
   buildFootnotes: () => string
   buildAddition: () => string
   createContainer: (html: string) => string
+
+  /** Headings collected during render (document order, incl. footnote title). */
+  getHeadings: () => CollectedHeading[]
 }

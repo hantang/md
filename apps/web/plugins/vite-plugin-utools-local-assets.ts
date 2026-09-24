@@ -1,53 +1,50 @@
 import type { Plugin } from 'vite'
+import { Buffer } from 'node:buffer'
+import { mkdir, writeFile } from 'node:fs/promises'
+import path from 'node:path'
 import process from 'node:process'
+import { MATHJAX_CDN_URL, MATHJAX_LOCAL_URL } from '@md/core/utils/mathjax'
+
+async function downloadMathJaxTexSvg(targetDir: string) {
+  const response = await fetch(MATHJAX_CDN_URL)
+  if (!response.ok)
+    throw new Error(`Failed to download MathJax: ${response.status}`)
+
+  await mkdir(targetDir, { recursive: true })
+  await writeFile(
+    path.join(targetDir, `tex-svg.js`),
+    Buffer.from(await response.arrayBuffer()),
+  )
+}
 
 /**
- * Vite 插件：在 uTools 构建时将远程资源替换为本地资源
+ * Vite plugin: download MathJax from doocs CDN as a local asset for uTools builds.
  */
 export function utoolsLocalAssetsPlugin(): Plugin {
   const isUTools = process.env.SERVER_ENV === `UTOOLS`
+  let outDir = ``
 
   return {
     name: `vite-plugin-utools-local-assets`,
     apply: `build`,
+    configResolved(config) {
+      outDir = config.build.outDir
+    },
     transformIndexHtml: {
       order: `post`,
       handler(html) {
         if (!isUTools)
           return html
 
-        // 替换 favicon
-        html = html.replace(
-          /https:\/\/cdn-doocs\.oss-cn-shenzhen\.aliyuncs\.com\/gh\/doocs\/md\/images\/favicon\.png/g,
-          `./src/assets/images/favicon.png`,
-        )
-
-        // 替换 apple-touch-icon
-        html = html.replace(
-          /https:\/\/cdn-doocs\.oss-cn-shenzhen\.aliyuncs\.com\/gh\/doocs\/md\/images\/1648303220922-7e14aefa-816e-44c1-8604-ade709ca1c69\.png/g,
-          `./src/assets/images/favicon.png`,
-        )
-
-        // 替换 MathJax
-        html = html.replace(
-          /https:\/\/cdn-doocs\.oss-cn-shenzhen\.aliyuncs\.com\/npm\/mathjax@3\/es5\/tex-svg\.js/g,
-          `./static/libs/mathjax/tex-svg.js`,
-        )
-
-        // 替换 Mermaid
-        html = html.replace(
-          /https:\/\/cdn-doocs\.oss-cn-shenzhen\.aliyuncs\.com\/npm\/mermaid@11\/dist\/mermaid\.min\.js/g,
-          `./static/libs/mermaid/mermaid.min.js`,
-        )
-
-        // 替换 WeChat Sync
-        html = html.replace(
-          /https:\/\/cdn-doocs\.oss-cn-shenzhen\.aliyuncs\.com\/gh\/wechatsync\/article-syncjs@latest\/dist\/main\.js/g,
-          `./static/libs/article-syncjs/main.js`,
-        )
-
-        return html
+        return html.split(MATHJAX_CDN_URL).join(MATHJAX_LOCAL_URL)
       },
+    },
+    async closeBundle() {
+      if (!isUTools)
+        return
+
+      const targetDir = path.join(outDir, `static`, `libs`, `mathjax`)
+      await downloadMathJaxTexSvg(targetDir)
     },
   }
 }

@@ -3,19 +3,24 @@ import { ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Textarea } from '@/components/ui/textarea'
-import { useQuickCommands } from '@/stores/quickCommands'
+import { useQuickCommandsStore } from '@/stores/quickCommands'
 
-/* ---------- 弹窗开关 ---------- */
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits([`update:open`])
 
 const dialogOpen = ref(props.open)
+const confirmDeleteId = ref<string | null>(null)
 watch(() => props.open, v => (dialogOpen.value = v))
-watch(dialogOpen, v => emit(`update:open`, v))
+watch(dialogOpen, (v) => {
+  emit(`update:open`, v)
+  if (!v)
+    confirmDeleteId.value = null
+})
 
-/* ---------- store & 新增 ---------- */
-const store = useQuickCommands()
+const store = useQuickCommandsStore()
+const { t } = useI18n()
 const label = ref(``)
 const template = ref(``)
 
@@ -27,12 +32,14 @@ function addCmd() {
   template.value = ``
 }
 
-/* ---------- 编辑 ---------- */
 const editingId = ref<string | null>(null)
 const editLabel = ref(``)
 const editTemplate = ref(``)
 
-function beginEdit(cmd: { id: string, label: string, template: string }) {
+function beginEdit(cmd: { id: string, label: string, template: string, builtin: boolean }) {
+  if (cmd.builtin)
+    return
+  confirmDeleteId.value = null
   editingId.value = cmd.id
   editLabel.value = cmd.label
   editTemplate.value = cmd.template
@@ -54,61 +61,93 @@ function saveEdit() {
       class="max-h-[90vh] w-[92vw] flex flex-col sm:max-w-lg"
     >
       <DialogHeader>
-        <DialogTitle>管理快捷指令</DialogTitle>
+        <DialogTitle>{{ t('ai.quickCommand.title') }}</DialogTitle>
       </DialogHeader>
 
-      <!-- 列表：独立滚动区域 -->
       <div class="space-y-4 flex-1 overflow-y-auto pr-1">
         <div
           v-for="cmd in store.commands"
           :key="cmd.id"
           class="flex flex-col gap-2 border rounded-md p-3"
         >
-          <!-- 编辑态 -->
-          <template v-if="editingId === cmd.id">
-            <Input v-model="editLabel" placeholder="指令名称" />
+          <template v-if="!cmd.builtin && editingId === cmd.id">
+            <Input v-model="editLabel" :placeholder="t('ai.quickCommand.namePlaceholder')" />
             <Textarea
               v-model="editTemplate"
               rows="2"
-              placeholder="模板内容，支持 {{sel}} 占位"
+              :placeholder="t('ai.quickCommand.templatePlaceholder')"
             />
             <div class="flex justify-end gap-2">
               <Button size="xs" @click="saveEdit">
-                保存
+                {{ t('common.save') }}
               </Button>
               <Button variant="ghost" size="xs" @click="cancelEdit">
-                取消
+                {{ t('common.cancel') }}
               </Button>
             </div>
           </template>
 
-          <!-- 查看态 -->
           <template v-else>
-            <div class="flex items-center justify-between">
-              <span class="break-all text-sm">{{ cmd.label }}</span>
-              <div class="flex gap-1">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex min-w-0 items-center gap-2">
+                <span class="break-all text-sm">{{ cmd.label }}</span>
+                <span
+                  v-if="cmd.builtin"
+                  class="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none"
+                >
+                  {{ t('ai.quickCommand.builtin') }}
+                </span>
+              </div>
+              <div v-if="!cmd.builtin" class="flex shrink-0 gap-1">
                 <Button variant="ghost" size="xs" @click="beginEdit(cmd)">
-                  编辑
+                  {{ t('common.edit') }}
                 </Button>
-                <Button variant="outline" size="xs" @click="store.remove(cmd.id)">
-                  删除
-                </Button>
+                <Popover
+                  :open="confirmDeleteId === cmd.id"
+                  @update:open="v => { if (!v) confirmDeleteId = null }"
+                >
+                  <PopoverTrigger as-child>
+                    <Button variant="outline" size="xs" @click="confirmDeleteId = cmd.id">
+                      {{ t('common.delete') }}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent class="w-auto p-3">
+                    <div class="flex flex-col gap-2">
+                      <p class="text-sm">
+                        {{ t('confirm.deleteItem', { name: cmd.label }) }}
+                      </p>
+                      <div class="flex justify-end gap-2">
+                        <Button size="xs" variant="outline" @click="confirmDeleteId = null">
+                          {{ t('common.cancel') }}
+                        </Button>
+                        <Button size="xs" @click="store.remove(cmd.id); confirmDeleteId = null">
+                          {{ t('common.confirm') }}
+                        </Button>
+                      </div>
+                    </div>
+                  </PopoverContent>
+                </Popover>
               </div>
             </div>
+            <p
+              v-if="cmd.builtin"
+              class="text-muted-foreground whitespace-pre-wrap break-all text-xs"
+            >
+              {{ cmd.template }}
+            </p>
           </template>
         </div>
       </div>
 
-      <!-- 新增表单：固定在滚动区下方 -->
       <div class="space-y-2 mt-4 border rounded-md p-3">
-        <Input v-model="label" placeholder="指令名称 (如：改写为 SEO 文案)" />
+        <Input v-model="label" :placeholder="t('ai.quickCommand.nameExamplePlaceholder')" />
         <Textarea
           v-model="template"
           rows="2"
-          placeholder="模板，可用 {{sel}} 占位，例如：\n请把以下文字改写为 SEO 友好的标题：\n\n{{sel}}"
+          :placeholder="t('ai.quickCommand.templateExamplePlaceholder')"
         />
         <Button class="w-full" @click="addCmd">
-          添加
+          {{ t('common.add') }}
         </Button>
       </div>
     </DialogContent>

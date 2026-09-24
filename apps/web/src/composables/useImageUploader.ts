@@ -1,59 +1,44 @@
-import SparkMD5 from 'spark-md5'
+import { toBase64 } from '@md/shared/utils/fileHelpers'
 import { ref } from 'vue'
-import { toBase64 } from '@/utils'
-import { fileUpload } from '@/utils/file'
+import { t } from '@/i18n/translate'
+import { fileUpload } from '@/services/upload'
+import { store } from '@/storage'
 
-const STORAGE_KEY = 'uploaded_image_map'
+const STORAGE_KEY = `uploaded_image_map`
+
+export function imageUploadCacheKey(host: string, hash: string): string {
+  return `${host}:${hash}`
+}
 
 export function useImageUploader() {
   const isUploading = ref(false)
   const error = ref<string | null>(null)
 
-  // 获取本地缓存
-  const getStorageMap = (): Record<string, string> => {
-    try {
-      const str = localStorage.getItem(STORAGE_KEY)
-      return str ? JSON.parse(str) : {}
-    }
-    catch {
-      return {}
-    }
+  const getStorageMap = async (): Promise<Record<string, string>> => {
+    return (await store.getJSON<Record<string, string>>(STORAGE_KEY, {})) ?? {}
   }
 
-  // 更新本地缓存
-  const updateStorageMap = (hash: string, url: string) => {
-    const map = getStorageMap()
+  const updateStorageMap = async (hash: string, url: string) => {
+    const map = await getStorageMap()
     map[hash] = url
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(map))
+    await store.setJSON(STORAGE_KEY, map)
   }
 
-  // 计算 Blob/File 的 MD5
-  const calculateHash = (file: Blob): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const fileReader = new FileReader()
-      const spark = new SparkMD5.ArrayBuffer()
-
-      fileReader.onload = (e) => {
-        if (e.target?.result) {
-          spark.append(e.target.result as ArrayBuffer)
-          resolve(spark.end())
-        }
-        else {
-          reject(new Error('文件读取失败'))
-        }
-      }
-      fileReader.onerror = () => reject(new Error('文件读取错误'))
-      fileReader.readAsArrayBuffer(file)
-    })
+  // SHA-256 for Blob/File via Web Crypto (replaces spark-md5)
+  const calculateHash = async (file: Blob): Promise<string> => {
+    const buffer = await file.arrayBuffer()
+    const digest = await crypto.subtle.digest(`SHA-256`, buffer)
+    return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, `0`)).join(``)
   }
 
-  // URL 转 File (需注意 CORS)
+  // URL → File (watch CORS)
   const urlToFile = async (url: string): Promise<File> => {
-    // 提取文件名
     const getFilename = (u: string) => u.split('/').pop()?.split('?')[0] || `image-${Date.now()}.png`
     const filename = getFilename(url)
 
-    // 内部函数：尝试获取 Blob
+    // Upgrade http:// to https:// to avoid mixed-content blocking
+    const safeUrl = url.replace(/^http:\/\//i, 'https://')
+
     const fetchBlob = async (targetUrl: string, options?: RequestInit) => {
       const res = await fetch(targetUrl, options)
       if (!res.ok)
@@ -62,32 +47,28 @@ export function useImageUploader() {
     }
 
     try {
-      // 1. 尝试直接请求 (设置 no-referrer 以尝试绕过部分防盗链)
-      const blob = await fetchBlob(url, { referrerPolicy: 'no-referrer' })
+      const blob = await fetchBlob(safeUrl, { referrerPolicy: 'no-referrer' })
       return new File([blob], filename, { type: blob.type })
     }
     catch (directErr) {
-      console.warn(`Direct fetch failed for ${url}, trying proxy...`, directErr)
+      console.warn(`Direct fetch failed for ${safeUrl}, trying proxy...`, directErr)
 
-      // 2. 失败后尝试通过 wsrv.nl 代理请求
       try {
-        const proxyUrl = `https://wsrv.nl/?url=${encodeURIComponent(url)}`
+        const proxyUrl = `https://wsrv.nl/?url=${encodeURIComponent(safeUrl)}`
         const blob = await fetchBlob(proxyUrl)
         return new File([blob], filename, { type: blob.type })
       }
       catch (proxyErr: any) {
-        // 3. 代理也失败，抛出异常
-        console.error(`Proxy fetch failed for ${url}`, proxyErr)
+        console.error(`Proxy fetch failed for ${safeUrl}`, proxyErr)
         const isCors = proxyErr.message.includes('Failed to fetch') || proxyErr.name === 'TypeError'
         const msg = isCors
-          ? '跨域请求失败：目标图片禁止了跨域访问，且代理服务也无法获取。'
-          : `图片下载失败: ${proxyErr.message}`
+          ? t('store.uploader.corsFailed')
+          : t('store.uploader.downloadFailed', { message: proxyErr.message })
         throw new Error(msg)
       }
     }
   }
 
-  // 核心上传方法
   const upload = async (resource: string | File): Promise<string> => {
     isUploading.value = true
     error.value = null
@@ -101,34 +82,26 @@ export function useImageUploader() {
         file = resource
       }
 
-      // 1. 计算 Hash
       const hash = await calculateHash(file)
-      console.log('File Hash:', hash)
+      const imgHost = (await store.get(`imgHost`)) || `default`
+      const cacheKey = imageUploadCacheKey(imgHost, hash)
 
-      // 2. 检查缓存
-      const cache = getStorageMap()
-      if (cache[hash]) {
-        console.log('⚡️ 命中缓存，跳过上传')
-        return cache[hash]
-      }
+      const cache = await getStorageMap()
+      if (cache[cacheKey])
+        return cache[cacheKey]
 
-      // 3. 准备上传：转换 Base64 (fileUpload 需要)
       const base64Content = await toBase64(file)
 
-      // 4. 调用项目现有 API 上传
-      console.log('🚀 调用 fileUpload 上传...')
       const url = await fileUpload(base64Content, file)
 
-      // 5. 写入缓存
-      if (url) {
-        updateStorageMap(hash, url)
-      }
+      if (url)
+        await updateStorageMap(cacheKey, url)
 
       return url
     }
     catch (err: any) {
       console.error(err)
-      const msg = err.message || '上传失败'
+      const msg = err.message || t('store.uploader.uploadFailed')
       error.value = msg
       throw new Error(msg)
     }

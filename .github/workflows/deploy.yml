@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }} - ${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -15,22 +15,23 @@ jobs:
     if: github.repository == 'doocs/md'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Set up node
-        uses: actions/setup-node@v6
+      - name: Set up pnpm
+        uses: pnpm/setup@v3
         with:
-          node-version: 22
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
+          version: 11.27.1
+          runtime: node@22
+          cache: true
+          install: false
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Run lint
+        run: pnpm run lint
 
       - name: Determine build command
         id: build-command
@@ -50,7 +51,7 @@ jobs:
           echo "md.doocs.org" > apps/web/dist/CNAME
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: apps/web/dist
 
@@ -66,7 +67,7 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
   deploy-cloudflare:
     needs: build
@@ -74,20 +75,20 @@ jobs:
     if: github.repository == 'doocs/md'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up node
-        uses: actions/setup-node@v6
+        uses: actions/checkout@v7
         with:
-          node-version: 22
+          persist-credentials: false
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - name: Set up pnpm
+        uses: pnpm/setup@v3
         with:
-          version: 10
+          version: 11.27.1
+          runtime: node@22
+          cache: true
+          install: false
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Build for Cloudflare Workers
         run: pnpm web build:h5-netlify
@@ -95,7 +96,7 @@ jobs:
           CF_WORKERS: 1
 
       - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

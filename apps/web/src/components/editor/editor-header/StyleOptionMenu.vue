@@ -2,22 +2,28 @@
 import type { IConfigOption } from '@md/shared/types'
 import type { Component } from 'vue'
 
+type StyleKey = `font` | `fontSize` | `color` | `lineHeight` | `blockSpacing` | `linkColor` | `blockquoteBackground`
+
 const props = defineProps<{
   title: string
+  styleKey?: StyleKey
   options: IConfigOption[]
   current: string
   change: (val: any) => void
   icon?: Component
 }>()
 
-function setStyle(title: string, value: string) {
-  switch (title) {
-    case `字体`:
+// Keys whose desc reads as a plain hint beside the label. `font` renders its desc
+// in the font itself, and `color` has no useful hint to show.
+const DESC_AS_HINT_KEYS: StyleKey[] = [`fontSize`, `lineHeight`, `blockSpacing`, `linkColor`, `blockquoteBackground`]
+
+const showDescHint = computed(() => !!props.styleKey && DESC_AS_HINT_KEYS.includes(props.styleKey))
+
+function setStyle(styleKey: typeof props.styleKey, value: string) {
+  switch (styleKey) {
+    case `font`:
       return { fontFamily: value }
-    case `字号`:
-      return { fontSize: value }
-    case `主题色`:
-    case `文字颜色`:
+    case `color`:
       return { color: value }
     default:
       return {}
@@ -32,21 +38,28 @@ function setStyle(title: string, value: string) {
       <span v-else class="mr-2 h-4 w-4" />
       <span>{{ props.title }}</span>
     </MenubarSubTrigger>
-    <MenubarSubContent class="max-h-56 overflow-auto">
-      <MenubarCheckboxItem
-        v-for="{ label, value, desc } in options"
-        :key="value"
-        :label="label"
-        :model-value="value"
-        class="w-50"
-        :checked="current === value"
-        @click="change(value)"
-      >
-        {{ label }}
-        <DropdownMenuShortcut :style="setStyle(title, value)">
-          {{ desc }}
-        </DropdownMenuShortcut>
-      </MenubarCheckboxItem>
+    <MenubarSubContent class="min-w-44 max-h-56 overflow-y-auto">
+      <MenubarRadioGroup :model-value="current" @update:model-value="change">
+        <MenubarRadioItem
+          v-for="{ label, value, desc } in options"
+          :key="value"
+          :value="value"
+          class="min-w-44"
+        >
+          {{ label }}
+          <DropdownMenuShortcut
+            v-if="styleKey === 'font' && desc"
+            :style="setStyle(styleKey, value)"
+          >
+            {{ desc }}
+          </DropdownMenuShortcut>
+          <DropdownMenuShortcut
+            v-else-if="showDescHint && desc"
+          >
+            {{ desc }}
+          </DropdownMenuShortcut>
+        </MenubarRadioItem>
+      </MenubarRadioGroup>
     </MenubarSubContent>
   </MenubarSub>
 </template>

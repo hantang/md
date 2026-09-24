@@ -1,40 +1,84 @@
 /**
- * CSS 运行时处理工具
- * 使用 PostCSS 在运行时处理动态注入的 CSS
+ * Runtime CSS processing in the browser (no PostCSS).
+ * Resolves var() and nested custom properties.
  */
 
-import postcss from 'postcss'
-import postcssCalc from 'postcss-calc'
-import postcssCustomProperties from 'postcss-custom-properties'
+function extractCSSVariables(css: string): Map<string, string> {
+  const vars = new Map<string, string>()
+  const regex = /--([\w-]+)\s*:\s*([^;}\n]+)/g
+  for (const match of css.matchAll(regex)) {
+    vars.set(`--${match[1]}`, match[2].trim())
+  }
+  return vars
+}
 
-/**
- * 使用 PostCSS 处理 CSS 字符串
- * 处理步骤：
- * 1. 使用 postcss-custom-properties 替换 CSS 变量为实际值
- * 2. 使用 postcss-calc 处理 calc() 表达式，简化可计算的表达式
- *
- * @param css - 原始 CSS 字符串
- * @returns 处理后的 CSS 字符串
- */
-export async function processCSS(css: string): Promise<string> {
-  try {
-    const result = await postcss([
-      postcssCustomProperties({
-        preserve: false, // 不保留原始 CSS 变量定义
-      }),
-      postcssCalc({
-        preserve: false, // 不保留 calc()，尽可能简化
-        mediaQueries: false, // 不处理媒体查询中的 calc()
-        selectors: false, // 不处理选择器中的 calc()
-      }),
-    ]).process(css, {
-      from: undefined, // 不指定源文件
+/** Replace var(--xxx) with values from the CSS string (fallbacks & nesting supported) */
+export function processCSS(css: string): string {
+  const vars = extractCSSVariables(css)
+
+  // Do not override from getComputedStyle — stale injected theme would lag one click behind
+  const varRegex = /var\(\s*(--[\w-]+)\s*(?:,([^()]*(?:\([^()]*\)[^()]*)*))?\)/g
+  let result = css
+  let prev = ``
+  let iterations = 0
+  while (result !== prev && iterations < 10) {
+    prev = result
+    result = result.replace(varRegex, (_, varName: string, fallback?: string) => {
+      const val = vars.get(varName)
+      if (val !== undefined)
+        return val
+      return fallback ? fallback.trim() : `var(${varName})`
     })
+    iterations++
+  }
 
-    return result.css
+  const calcRegex = /calc\(([^()]+)\)/g
+  prev = ``
+  iterations = 0
+  while (result !== prev && iterations < 10) {
+    prev = result
+    result = result.replace(calcRegex, (_, inner: string) => evaluateCalcInner(inner.trim()))
+    iterations++
   }
-  catch (error) {
-    console.warn(`[processCSS] CSS 处理失败，使用原始 CSS:`, error)
-    return css
+
+  return result
+}
+
+const UNITS = `px|em|rem|vw|vh|vmin|vmax|%|pt|pc|cm|mm|in|ex|ch`
+const NUM = `(-?[\\d.]+)`
+const UNIT_VAL = `(-?[\\d.]+)(${UNITS})?`
+
+/** Evaluate calc() inner expression (same-unit +/-, scale with unitless operand) */
+function evaluateCalcInner(expr: string): string {
+  const mul = expr.match(new RegExp(`^${UNIT_VAL}\\s*\\*\\s*${UNIT_VAL}$`))
+  if (mul) {
+    const [, a, ua, b, ub] = mul
+    if (!ua !== !ub) {
+      const unit = ua || ub
+      const result = round(Number.parseFloat(a) * Number.parseFloat(b))
+      return `${result}${unit}`
+    }
   }
+
+  const div = expr.match(new RegExp(`^${UNIT_VAL}\\s*/\\s*${NUM}$`))
+  if (div) {
+    const [, a, unit,, b] = div
+    const result = round(Number.parseFloat(a) / Number.parseFloat(b))
+    return `${result}${unit ?? ``}`
+  }
+
+  const addSub = expr.match(new RegExp(`^${UNIT_VAL}\\s*([+-])\\s*${UNIT_VAL}$`))
+  if (addSub) {
+    const [, a, ua, op, b, ub] = addSub
+    if (ua === ub) {
+      const result = round(op === `+` ? Number.parseFloat(a) + Number.parseFloat(b) : Number.parseFloat(a) - Number.parseFloat(b))
+      return `${result}${ua ?? ``}`
+    }
+  }
+
+  return `calc(${expr})`
+}
+
+function round(n: number): number {
+  return Math.round(n * 10000) / 10000
 }

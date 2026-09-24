@@ -1,12 +1,7 @@
 <script setup lang="ts">
 import type { Post } from '@md/shared/types'
+import type { CoseTaskStatus } from '@/types/cose'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-
-declare global {
-  interface Window {
-    $cose: any
-  }
-}
 
 const props = defineProps<{
   post: Post
@@ -15,12 +10,14 @@ const props = defineProps<{
 
 const emit = defineEmits([`update:open`])
 
+const { t } = useI18n()
+
 const dialogVisible = computed({
   get: () => props.open,
   set: value => emit(`update:open`, value),
 })
 
-const taskStatus = ref<any>(null)
+const taskStatus = ref<CoseTaskStatus | null>(null)
 const submitting = ref(false)
 
 async function startPost() {
@@ -38,7 +35,7 @@ async function startPost() {
     accounts: props.post.accounts.filter(a => a.checked),
   }
 
-  const onProgress = (newStatus: any) => {
+  const onProgress = (newStatus: CoseTaskStatus) => {
     taskStatus.value = newStatus
   }
 
@@ -47,7 +44,7 @@ async function startPost() {
   }
 
   try {
-    window.$cose?.addTask(taskData, onProgress, onComplete)
+    window.$cose?.addTask?.(taskData, onProgress, onComplete)
   }
   catch (error) {
     console.error(`发布失败:`, error)
@@ -63,14 +60,14 @@ watch(() => props.open, (newVal) => {
 
 <template>
   <Dialog v-model:open="dialogVisible">
-    <DialogContent>
+    <DialogContent class="!max-w-[95vw] !w-[min(560px,95vw)] max-h-[85vh] flex flex-col overflow-hidden">
       <DialogHeader>
-        <DialogTitle>提交发布任务</DialogTitle>
+        <DialogTitle>{{ t('postTask.title') }}</DialogTitle>
       </DialogHeader>
 
       <div class="mt-4">
         <div v-if="!taskStatus" class="py-4 text-center">
-          等待发布..
+          {{ t('postTask.waiting') }}
         </div>
         <div v-else class="max-h-[400px] flex flex-col overflow-y-auto">
           <div
@@ -95,22 +92,22 @@ watch(() => props.open, (newVal) => {
               }"
             >
               <template v-if="account.status === 'uploading'">
-                {{ account.msg || '发布中' }}
+                {{ account.msg || t('postTask.publishing') }}
               </template>
 
               <template v-if="account.status === 'failed'">
-                同步失败, 错误内容：{{ account.error }}
+                {{ t('postTask.syncFailed', { error: account.error }) }}
               </template>
 
               <template v-if="account.status === 'done' && account.editResp">
-                同步成功
+                {{ t('postTask.syncSuccess') }}
                 <a
                   v-if="account.type !== 'wordpress' && account.editResp"
                   :href="account.editResp.draftLink"
                   class="ml-2 text-blue-500 hover:underline"
                   referrerPolicy="no-referrer"
-                  target="_blank"
-                >查看草稿</a>
+                  target="_blank" rel="noopener noreferrer"
+                >{{ t('postTask.viewDraft') }}</a>
               </template>
             </div>
           </div>

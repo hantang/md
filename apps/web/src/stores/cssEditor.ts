@@ -1,66 +1,107 @@
 import type { EditorView } from '@codemirror/view'
 import { Compartment, EditorState } from '@codemirror/state'
 import { EditorView as CMEditorView } from '@codemirror/view'
-import { cssSetup, DEFAULT_CUSTOM_THEME, theme as editorTheme } from '@md/shared'
-import { addPrefix } from '@/utils'
-import { store } from '@/utils/storage'
+import { theme as editorTheme, getDefaultCustomTheme } from '@md/shared'
+import { cssSetup } from '@md/shared/editor/css'
+import { sanitizeTitle } from '@md/shared/utils/basicHelpers'
+import { downloadFile } from '@md/shared/utils/fileHelpers'
+import { uuidv4 } from '@md/shared/utils/uuid'
+import { getLocale, t } from '@/i18n/translate'
+import { store } from '@/storage'
+import { addPrefix } from '@/storage/prefix'
 
-const DEFAULT_CSS_CONTENT = DEFAULT_CUSTOM_THEME
+function getDefaultCssContent() {
+  return getDefaultCustomTheme(getLocale())
+}
 
-/**
- * CSS 编辑器配置接口
- */
+/** CSS editor tab configuration. */
 export interface CssContentConfig {
   active: string
   tabs: {
+    id: string
     title: string
     name: string
     content: string
+    createDatetime: Date
+    updateDatetime: Date
   }[]
+  selectedIds?: string[]
+  isSelectMode?: boolean
 }
 
-/**
- * CSS 编辑器 Store
- * 负责管理自定义 CSS 编辑器及其配置
- */
+/** Manages the custom CSS editor and its tab configuration. */
 export const useCssEditorStore = defineStore(`cssEditor`, () => {
   const isDark = useDark()
 
-  // CSS 编辑器实例
   const cssEditor = ref<EditorView | null>(null)
   const cssEditorThemeCompartment = ref<Compartment | null>(null)
 
-  /**
-   * 自定义 CSS 内容
-   * @deprecated 在后续版本中将会移除
-   */
-  const cssContent = store.reactive(`__css_content`, DEFAULT_CSS_CONTENT)
-
-  // CSS 内容配置
   const cssContentConfig = store.reactive<CssContentConfig>(addPrefix(`css_content_config`), {
-    active: `方案1`,
-    tabs: [
-      {
-        title: `方案1`,
-        name: `方案1`,
-        content: cssContent.value || DEFAULT_CSS_CONTENT,
-      },
-    ],
+    active: ``,
+    tabs: [],
   })
 
-  // 获取当前激活的 Tab
+  // Backfill missing id / timestamps; migrate active from name to id
+  onBeforeMount(() => {
+    const now = new Date()
+
+    if (cssContentConfig.value.tabs.length === 0) {
+      const defaultId = uuidv4()
+      cssContentConfig.value.tabs = [{
+        id: defaultId,
+        title: t('store.cssEditor.schemeDefault'),
+        name: t('store.cssEditor.schemeDefault'),
+        content: getDefaultCssContent(),
+        createDatetime: now,
+        updateDatetime: now,
+      }]
+      cssContentConfig.value.active = defaultId
+      return
+    }
+
+    cssContentConfig.value.tabs = cssContentConfig.value.tabs.map((tab, index) => ({
+      ...tab,
+      id: tab.id ?? uuidv4(),
+      createDatetime: tab.createDatetime ?? new Date(now.getTime() + index),
+      updateDatetime: tab.updateDatetime ?? new Date(now.getTime() + index),
+    }))
+
+    const activeById = cssContentConfig.value.tabs.find(t => t.id === cssContentConfig.value.active)
+    if (!activeById) {
+      // Legacy data stored active as tab name; resolve to id
+      const activeByName = cssContentConfig.value.tabs.find(t => t.name === cssContentConfig.value.active)
+      cssContentConfig.value.active = activeByName?.id ?? cssContentConfig.value.tabs[0].id
+    }
+  })
+
   const getCurrentTab = () => {
-    return cssContentConfig.value.tabs.find((tab) => {
-      return tab.name === cssContentConfig.value.active
-    })!
+    const tab = cssContentConfig.value.tabs.find(tab => tab.id === cssContentConfig.value.active)
+    if (!tab) {
+      // Fallback: if tabs are empty or corrupted, create a default tab
+      if (cssContentConfig.value.tabs.length === 0) {
+        const defaultId = uuidv4()
+        const now = new Date()
+        cssContentConfig.value.tabs = [{
+          id: defaultId,
+          title: t('store.cssEditor.schemeDefault'),
+          name: t('store.cssEditor.schemeDefault'),
+          content: getDefaultCssContent(),
+          createDatetime: now,
+          updateDatetime: now,
+        }]
+        cssContentConfig.value.active = defaultId
+        return cssContentConfig.value.tabs[0]
+      }
+      cssContentConfig.value.active = cssContentConfig.value.tabs[0].id
+      return cssContentConfig.value.tabs[0]
+    }
+    return tab
   }
 
-  // 获取当前 Tab 的内容
   const getCurrentTabContent = () => {
     return getCurrentTab().content
   }
 
-  // 设置编辑器内容
   const setCssEditorValue = (content: string) => {
     if (cssEditor.value) {
       cssEditor.value.dispatch({
@@ -69,81 +110,75 @@ export const useCssEditorStore = defineStore(`cssEditor`, () => {
     }
   }
 
-  // 切换 Tab 的回调（由外部传入，用于触发渲染刷新）
+  /** External callback to refresh preview when the active CSS tab changes. */
   let onTabChangedCallback: ((content: string) => void) | null = null
 
-  // 设置切换 Tab 的回调
   const setOnTabChangedCallback = (callback: (content: string) => void) => {
     onTabChangedCallback = callback
   }
 
-  // 切换 Tab
-  const tabChanged = (name: string) => {
-    console.log(`tabChanged`, name)
-    cssContentConfig.value.active = name
-    const content = cssContentConfig.value.tabs.find((tab) => {
-      return tab.name === name
-    })!.content
-    setCssEditorValue(content)
+  const tabChanged = (id: string) => {
+    cssContentConfig.value.active = id
+    const tab = cssContentConfig.value.tabs.find(tab => tab.id === id)
+    if (!tab)
+      return
+    setCssEditorValue(tab.content)
 
-    // 触发回调以刷新渲染
     if (onTabChangedCallback) {
-      onTabChangedCallback(content)
+      onTabChangedCallback(tab.content)
     }
   }
 
-  // 重命名 Tab
   const renameTab = (name: string) => {
     const tab = getCurrentTab()
     tab.title = name
     tab.name = name
-    cssContentConfig.value.active = name
   }
 
-  // 添加 CSS 方案
   const addCssContentTab = (name: string, initialContent?: string) => {
-    const content = initialContent || DEFAULT_CSS_CONTENT
+    const content = initialContent ?? getDefaultCssContent()
+    const now = new Date()
     cssContentConfig.value.tabs.push({
+      id: uuidv4(),
       name,
       title: name,
       content,
+      createDatetime: now,
+      updateDatetime: now,
     })
-    cssContentConfig.value.active = name
-    console.log(`addCssContentTab`, name)
+    const newTab = cssContentConfig.value.tabs[cssContentConfig.value.tabs.length - 1]
+    cssContentConfig.value.active = newTab.id
     setCssEditorValue(content)
 
-    // 触发回调以刷新渲染（使用新方案的 CSS）
     if (onTabChangedCallback) {
       onTabChangedCallback(content)
     }
   }
 
-  // 验证 Tab 名称
-  const validatorTabName = (val: string) => {
-    return cssContentConfig.value.tabs.every(({ name }) => name !== val)
-  }
-
-  // 重置 CSS 配置
   const resetCssConfig = () => {
+    const defaultContent = getDefaultCssContent()
+    const defaultId = uuidv4()
     cssContentConfig.value = {
-      active: `方案 1`,
+      active: defaultId,
       tabs: [
         {
-          title: `方案 1`,
-          name: `方案 1`,
-          content: DEFAULT_CSS_CONTENT,
+          id: defaultId,
+          title: t('store.cssEditor.schemeDefaultSpaced'),
+          name: t('store.cssEditor.schemeDefaultSpaced'),
+          content: defaultContent,
+          createDatetime: new Date(),
+          updateDatetime: new Date(),
         },
       ],
     }
 
     if (cssEditor.value) {
       cssEditor.value.dispatch({
-        changes: { from: 0, to: cssEditor.value.state.doc.length, insert: DEFAULT_CSS_CONTENT },
+        changes: { from: 0, to: cssEditor.value.state.doc.length, insert: defaultContent },
       })
     }
   }
 
-  // 初始化 CSS 编辑器
   const initCssEditor = (onUpdate: (content: string) => void) => {
     const cssEditorDom = document.querySelector<HTMLTextAreaElement>(`#cssEditor`)
     if (!cssEditorDom)
@@ -151,15 +186,12 @@ export const useCssEditorStore = defineStore(`cssEditor`, () => {
 
     cssEditorDom.value = getCurrentTab().content
 
-    // 创建 CSS 编辑器的容器
     const cssContainer = document.createElement(`div`)
     cssContainer.className = 'w-full h-full'
     cssEditorDom.parentNode?.replaceChild(cssContainer, cssEditorDom)
 
-    // 创建主题 Compartment 用于动态切换
     cssEditorThemeCompartment.value = new Compartment()
 
-    // 创建 CSS 编辑器
     const state = EditorState.create({
       doc: getCurrentTab().content,
       extensions: [
@@ -168,7 +200,9 @@ export const useCssEditorStore = defineStore(`cssEditor`, () => {
         CMEditorView.updateListener.of((update) => {
           if (update.docChanged) {
             const content = update.state.doc.toString()
-            getCurrentTab().content = content
+            const tab = getCurrentTab()
+            tab.content = content
+            tab.updateDatetime = new Date()
             onUpdate(content)
           }
         }),
@@ -181,7 +215,6 @@ export const useCssEditorStore = defineStore(`cssEditor`, () => {
     }))
   }
 
-  // 监听深色模式变化
   watch(isDark, () => {
     if (cssEditor.value && cssEditorThemeCompartment.value) {
       cssEditor.value.dispatch({
@@ -190,24 +223,16 @@ export const useCssEditorStore = defineStore(`cssEditor`, () => {
     }
   })
 
-  // 清空过往历史记录
-  onMounted(() => {
-    cssContent.value = ``
-  })
-
-  // 滚动到指定标题级别的 CSS 区域并选中
   const scrollToHeading = (level: string) => {
     if (!cssEditor.value)
       return
 
     const doc = cssEditor.value.state.doc.toString()
-    // 匹配 h1 { 或 h2 { 等模式（支持换行和空格）
     const pattern = new RegExp(`^${level}\\s*\\{`, `m`)
     const match = doc.match(pattern)
 
     if (match && match.index !== undefined) {
       const startPos = match.index
-      // 查找对应的结束括号
       let braceCount = 0
       let endPos = startPos
       let foundStart = false
@@ -226,14 +251,104 @@ export const useCssEditorStore = defineStore(`cssEditor`, () => {
         }
       }
 
-      // 滚动到位置并选中该区域
       cssEditor.value.dispatch({
         selection: { anchor: startPos, head: endPos },
         scrollIntoView: true,
       })
 
-      // 聚焦编辑器
       cssEditor.value.focus()
+    }
+  }
+
+  const toggleSelectMode = () => {
+    cssContentConfig.value.isSelectMode = !(cssContentConfig.value.isSelectMode ?? false)
+    if (!cssContentConfig.value.isSelectMode) {
+      cssContentConfig.value.selectedIds = []
+    }
+  }
+
+  const toggleSelectTab = (id: string) => {
+    const selectedIds = cssContentConfig.value.selectedIds ?? []
+    const idx = selectedIds.indexOf(id)
+    if (idx === -1) {
+      cssContentConfig.value.selectedIds = [...selectedIds, id]
+    }
+    else {
+      cssContentConfig.value.selectedIds = selectedIds.filter(i => i !== id)
+    }
+  }
+
+  const selectAllTabs = () => {
+    cssContentConfig.value.selectedIds = cssContentConfig.value.tabs.map(t => t.id)
+  }
+
+  const clearSelection = () => {
+    cssContentConfig.value.selectedIds = []
+  }
+
+  const batchDeleteTabs = () => {
+    const selectedIds = cssContentConfig.value.selectedIds ?? []
+    if (selectedIds.length === 0)
+      return
+
+    if (selectedIds.length >= cssContentConfig.value.tabs.length) {
+      toast.warning(t('store.cssEditor.keepAtLeastOne'))
+      return
+    }
+
+    const tabs = cssContentConfig.value.tabs.filter(tab => !selectedIds.includes(tab.id))
+
+    if (selectedIds.includes(cssContentConfig.value.active)) {
+      cssContentConfig.value.active = tabs[0].id
+      setCssEditorValue(tabs[0].content)
+      if (onTabChangedCallback) {
+        onTabChangedCallback(tabs[0].content)
+      }
+    }
+
+    cssContentConfig.value.tabs = tabs
+    cssContentConfig.value.selectedIds = []
+    cssContentConfig.value.isSelectMode = false
+    toast.success(t('store.cssEditor.batchDeleted', { count: selectedIds.length }))
+  }
+
+  const batchExportTabs = async () => {
+    const selectedIds = cssContentConfig.value.selectedIds ?? []
+    if (selectedIds.length === 0)
+      return
+
+    if (selectedIds.length === 1) {
+      const tab = cssContentConfig.value.tabs.find(t => t.id === selectedIds[0])
+      if (tab) {
+        downloadFile(`data:text/css;charset=utf-8,${encodeURIComponent(tab.content)}`, `${sanitizeTitle(tab.title)}.css`)
+      }
+    }
+    else {
+      const { strToU8, zip } = await import('fflate')
+      const files: Record<string, Uint8Array> = {}
+      selectedIds.forEach((id) => {
+        const tab = cssContentConfig.value.tabs.find(t => t.id === id)
+        if (tab) {
+          files[`${sanitizeTitle(tab.title)}.css`] = strToU8(tab.content)
+        }
+      })
+      const data = await new Promise<Uint8Array<ArrayBuffer>>((resolve, reject) =>
+        zip(files, (err, out) => (err ? reject(err) : resolve(out as Uint8Array<ArrayBuffer>))))
+      const url = URL.createObjectURL(new Blob([data], { type: `application/zip` }))
+      downloadFile(url, `css-schemes.zip`)
+      URL.revokeObjectURL(url)
+    }
+
+    cssContentConfig.value.selectedIds = []
+    cssContentConfig.value.isSelectMode = false
+    toast.success(t('store.cssEditor.batchExported', { count: selectedIds.length }))
+  }
+
+  const exportSingleTab = (id: string) => {
+    const tab = cssContentConfig.value.tabs.find(t => t.id === id)
+    if (tab) {
+      downloadFile(`data:text/css;charset=utf-8,${encodeURIComponent(tab.content)}`, `${sanitizeTitle(tab.title)}.css`)
+      toast.success(t('store.cssEditor.singleExported', { name: tab.title }))
     }
   }
 
@@ -241,6 +356,8 @@ export const useCssEditorStore = defineStore(`cssEditor`, () => {
     // State
     cssEditor,
     cssContentConfig,
+    isSelectMode: computed(() => cssContentConfig.value.isSelectMode ?? false),
+    selectedIds: computed(() => cssContentConfig.value.selectedIds ?? []),
 
     // Getters
     getCurrentTab,
@@ -252,9 +369,17 @@ export const useCssEditorStore = defineStore(`cssEditor`, () => {
     tabChanged,
     renameTab,
     addCssContentTab,
-    validatorTabName,
     resetCssConfig,
     initCssEditor,
     scrollToHeading,
+
+    // Batch Actions
+    toggleSelectMode,
+    toggleSelectTab,
+    selectAllTabs,
+    clearSelection,
+    batchDeleteTabs,
+    batchExportTabs,
+    exportSingleTab,
   }
 })

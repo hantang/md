@@ -1,66 +1,51 @@
 <script setup lang="ts">
-import { Copy, Menu, Palette } from 'lucide-vue-next'
+import { Copy, Loader2, Menu, Palette } from '@lucide/vue'
+import { defineAsyncComponent } from 'vue'
+import { useEditorRefresh } from '@/composables/useEditorRefresh'
+import { delay } from '@/lib/delay'
+import { generatePureHTML, processClipboardContent } from '@/services/export'
 import { useEditorStore } from '@/stores/editor'
 import { useExportStore } from '@/stores/export'
 import { useRenderStore } from '@/stores/render'
 import { useThemeStore } from '@/stores/theme'
 import { useUIStore } from '@/stores/ui'
-import { addPrefix, generatePureHTML, processClipboardContent } from '@/utils'
-import { store } from '@/utils/storage'
 import EditDropdown from './EditDropdown.vue'
 import FileDropdown from './FileDropdown.vue'
 import FormatDropdown from './FormatDropdown.vue'
 import HelpDropdown from './HelpDropdown.vue'
 import InsertDropdown from './InsertDropdown.vue'
 import StyleDropdown from './StyleDropdown.vue'
-import ViewDropdown from './ViewDropdown.vue'
 
 const emit = defineEmits([`startCopy`, `endCopy`])
+const { t } = useI18n()
+const AboutDialog = defineAsyncComponent(() => import('./AboutDialog.vue'))
+const FundDialog = defineAsyncComponent(() => import('./FundDialog.vue'))
+const EditorStateDialog = defineAsyncComponent(() => import('@/components/editor/dialogs/EditorStateDialog.vue'))
+const PreferencesDialog = defineAsyncComponent(() => import('@/components/editor/dialogs/PreferencesDialog.vue'))
+const MarkdownHelpDialog = defineAsyncComponent(() => import('./MarkdownHelpDialog.vue'))
+const KeyboardShortcutsDialog = defineAsyncComponent(() => import('./KeyboardShortcutsDialog.vue'))
+const AccountDialog = defineAsyncComponent(() => import('./AccountDialog.vue'))
+const SyncDialog = defineAsyncComponent(() => import('./SyncDialog.vue'))
+const ShareDialog = defineAsyncComponent(() => import('./ShareDialog.vue'))
+const PdfExportDialog = defineAsyncComponent(() => import('@/components/editor/dialogs/PdfExportDialog.vue'))
 
 const editorStore = useEditorStore()
 const themeStore = useThemeStore()
 const renderStore = useRenderStore()
 const uiStore = useUIStore()
 const exportStore = useExportStore()
+const { editorRefresh } = useEditorRefresh()
 
 const { editor } = storeToRefs(editorStore)
 const { output } = storeToRefs(renderStore)
 const { primaryColor } = storeToRefs(themeStore)
-const { isOpenRightSlider } = storeToRefs(uiStore)
+const { isOpenRightSlider, isShowSyncDialog, isShowAccountDialog, isShowShareDialog, isShowPdfExportDialog, isShowAboutDialog, isShowFundDialog, isShowEditorStateDialog, isShowPreferencesDialog, isShowMarkdownHelpDialog, isShowKeyboardShortcutsDialog, copyMode } = storeToRefs(uiStore)
 
-// Editor refresh function
-function editorRefresh() {
-  themeStore.updateCodeTheme()
-
-  const raw = editorStore.getContent()
-  renderStore.render(raw)
-}
-
-// 对话框状态
-const aboutDialogVisible = ref(false)
-const fundDialogVisible = ref(false)
-const editorStateDialogVisible = ref(false)
-
-// 处理帮助菜单事件
-function handleOpenAbout() {
-  aboutDialogVisible.value = true
-}
-
-function handleOpenFund() {
-  fundDialogVisible.value = true
-}
-
-function handleOpenEditorState() {
-  editorStateDialogVisible.value = true
-}
-
-const copyMode = store.reactive(addPrefix(`copyMode`), `txt`)
+const isCopying = ref(false)
 
 const { copy: copyContent } = useClipboard({
   legacy: true,
 })
-
-const delay = (ms: number) => new Promise<void>(resolve => window.setTimeout(resolve, ms))
 
 const normalizeErrorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
@@ -91,16 +76,9 @@ function fallbackCopyUsingExecCommand(htmlContent: string) {
   tempContainer.style.setProperty(`color`, `#000000`, `important`)
 
   document.body.appendChild(tempContainer)
-
-  const htmlElement = document.documentElement
-  const wasDark = htmlElement.classList.contains(`dark`)
   let successful = false
 
   try {
-    if (wasDark) {
-      htmlElement.classList.remove(`dark`)
-    }
-
     const range = document.createRange()
     range.selectNodeContents(tempContainer)
     selection.removeAllRanges()
@@ -114,108 +92,122 @@ function fallbackCopyUsingExecCommand(htmlContent: string) {
   finally {
     selection.removeAllRanges()
     tempContainer.remove()
-
-    if (wasDark) {
-      htmlElement.classList.add(`dark`)
-    }
   }
 
   return successful
 }
 
-// 复制到微信公众号
 async function copy() {
-  // 如果是 Markdown 源码，直接复制并返回
+  isCopying.value = true
+
   if (copyMode.value === `md`) {
-    const mdContent = editor.value?.state.doc.toString() || ``
-    await copyContent(mdContent)
-    toast.success(`已复制 Markdown 源码到剪贴板。`)
+    try {
+      const mdContent = editor.value?.state.doc.toString() || ``
+      await copyContent(mdContent)
+      toast.success(t(`toast.copiedMarkdown`))
+    }
+    catch (error) {
+      toast.error(t(`toast.copyFailed`, { message: normalizeErrorMessage(error) }))
+    }
+    finally {
+      isCopying.value = false
+    }
     return
   }
 
-  // 以下处理非 Markdown 的复制流程
   emit(`startCopy`)
 
   setTimeout(() => {
     nextTick(async () => {
       try {
-        await processClipboardContent(primaryColor.value)
-      }
-      catch (error) {
-        toast.error(`处理 HTML 失败，请联系开发者。${normalizeErrorMessage(error)}`)
-        editorRefresh()
-        emit(`endCopy`)
-        return
-      }
+        let processedClipboardContent: {
+          html: string
+          plainText: string
+          hasPendingAsyncContent: boolean
+        }
 
-      const clipboardDiv = document.getElementById(`output`)
-
-      if (!clipboardDiv) {
-        toast.error(`未找到复制输出区域，请刷新页面后重试。`)
-        editorRefresh()
-        emit(`endCopy`)
-        return
-      }
-
-      clipboardDiv.focus()
-      window.getSelection()?.removeAllRanges()
-
-      const temp = clipboardDiv.innerHTML
-
-      if (copyMode.value === `txt`) {
         try {
-          if (typeof ClipboardItem === `undefined`) {
-            throw new TypeError(`ClipboardItem is not supported in this browser.`)
-          }
-
-          const plainText = clipboardDiv.textContent || ``
-          const clipboardItem = new ClipboardItem({
-            'text/html': new Blob([temp], { type: `text/html` }),
-            'text/plain': new Blob([plainText], { type: `text/plain` }),
-          })
-
-          await writeClipboardItems([clipboardItem])
+          processedClipboardContent = await processClipboardContent(primaryColor.value)
         }
         catch (error) {
-          const fallbackSucceeded = fallbackCopyUsingExecCommand(temp)
-          if (!fallbackSucceeded) {
-            clipboardDiv.innerHTML = output.value
-            window.getSelection()?.removeAllRanges()
-            editorRefresh()
-            toast.error(`复制失败，请联系开发者。${normalizeErrorMessage(error)}`)
-            emit(`endCopy`)
-            return
+          toast.error(t(`toast.processHtmlFailed`, { message: normalizeErrorMessage(error) }))
+          editorRefresh()
+          return
+        }
+
+        if (processedClipboardContent.hasPendingAsyncContent) {
+          toast.warning(t(`toast.asyncContentPending`))
+        }
+
+        const clipboardDiv = document.getElementById(`output`)
+
+        if (!clipboardDiv) {
+          toast.error(t(`toast.outputAreaMissing`))
+          editorRefresh()
+          return
+        }
+
+        clipboardDiv.focus()
+        window.getSelection()?.removeAllRanges()
+
+        const temp = processedClipboardContent.html
+
+        if (copyMode.value === `txt`) {
+          try {
+            if (typeof ClipboardItem === `undefined`) {
+              throw new TypeError(`ClipboardItem is not supported in this browser.`)
+            }
+
+            const clipboardItem = new ClipboardItem({
+              'text/html': new Blob([temp], { type: `text/html` }),
+              'text/plain': new Blob([processedClipboardContent.plainText], { type: `text/plain` }),
+            })
+
+            await writeClipboardItems([clipboardItem])
+          }
+          catch (error) {
+            const fallbackSucceeded = fallbackCopyUsingExecCommand(temp)
+            if (!fallbackSucceeded) {
+              window.getSelection()?.removeAllRanges()
+              editorRefresh()
+              toast.error(t(`toast.copyFailedContactDev`, { message: normalizeErrorMessage(error) }))
+              return
+            }
           }
         }
-      }
 
-      clipboardDiv.innerHTML = output.value
+        if (copyMode.value === `html`) {
+          await copyContent(temp)
+        }
+        else if (copyMode.value === `html-without-style`) {
+          await copyContent(await generatePureHTML(editor.value!.state.doc.toString()))
+        }
+        else if (copyMode.value === `html-and-style`) {
+          await copyContent(exportStore.editorContent2HTML())
+        }
 
-      if (copyMode.value === `html`) {
-        await copyContent(temp)
+        toast.success(
+          copyMode.value === `html`
+            ? t(`toast.copiedHtml`)
+            : t(`toast.copiedRendered`),
+        )
+        window.dispatchEvent(
+          new CustomEvent(`copyToMp`, {
+            detail: {
+              content: output.value,
+            },
+          }),
+        )
+        editorRefresh()
       }
-      else if (copyMode.value === `html-without-style`) {
-        await copyContent(await generatePureHTML(editor.value!.state.doc.toString()))
+      catch (error) {
+        toast.error(t(`toast.copyFailed`, { message: normalizeErrorMessage(error) }))
+        editorRefresh()
       }
-      else if (copyMode.value === `html-and-style`) {
-        await copyContent(exportStore.editorContent2HTML())
+      finally {
+        emit(`endCopy`)
+        isCopying.value = false
       }
-
-      // 输出提示
-      toast.success(
-        copyMode.value === `html`
-          ? `已复制 HTML 源码，请进行下一步操作。`
-          : `已复制渲染后的内容到剪贴板，可直接到公众号后台粘贴。`,
-      )
-      window.dispatchEvent(
-        new CustomEvent(`copyToMp`, {
-          detail: {
-            content: output.value,
-          },
-        }),
-      )
-      editorRefresh()
-      emit(`endCopy`)
     })
   }, 350)
 }
@@ -235,74 +227,76 @@ function copyToWeChat() {
   <header
     class="header-container h-15 flex flex-wrap items-center justify-between px-5 relative"
   >
-    <!-- 桌面端左侧菜单 -->
     <div class="space-x-1 hidden md:flex">
       <Menubar class="menubar border-0">
-        <FileDropdown @open-editor-state="handleOpenEditorState" />
+        <FileDropdown />
         <EditDropdown @copy="handleCopy" />
         <FormatDropdown />
         <InsertDropdown />
         <StyleDropdown />
-        <ViewDropdown />
-        <HelpDropdown @open-about="handleOpenAbout" @open-fund="handleOpenFund" />
+        <HelpDropdown />
       </Menubar>
     </div>
 
-    <!-- 移动端汉堡菜单按钮 -->
     <div class="md:hidden">
       <Menubar class="menubar border-0 p-0">
         <MenubarMenu>
-          <MenubarTrigger class="p-0">
-            <Button variant="outline" size="icon">
+          <MenubarTrigger class="p-0" :aria-label="t('header.menu')">
+            <Button variant="outline" size="icon" tabindex="-1" aria-hidden="true">
               <Menu class="size-4" />
             </Button>
           </MenubarTrigger>
           <MenubarContent align="start">
-            <FileDropdown :as-sub="true" @open-editor-state="handleOpenEditorState" />
+            <FileDropdown :as-sub="true" />
             <EditDropdown :as-sub="true" @copy="handleCopy" />
             <FormatDropdown :as-sub="true" />
             <InsertDropdown :as-sub="true" />
             <StyleDropdown :as-sub="true" />
-            <ViewDropdown :as-sub="true" />
-            <HelpDropdown :as-sub="true" @open-about="handleOpenAbout" @open-fund="handleOpenFund" />
+            <HelpDropdown :as-sub="true" />
           </MenubarContent>
         </MenubarMenu>
       </Menubar>
     </div>
 
-    <!-- 右侧操作区 -->
     <div class="flex flex-wrap items-center gap-2">
-      <!-- 复制按钮 -->
       <Button
         variant="outline"
-        class="h-9"
+        class="h-9 max-md:w-9 max-md:px-0"
+        :disabled="isCopying"
+        :aria-busy="isCopying"
+        :aria-label="t('header.copy')"
         @click="copyToWeChat"
       >
-        <Copy class="mr-2 h-4 w-4" />
-        <span>复制</span>
+        <Loader2 v-if="isCopying" class="h-4 w-4 animate-spin md:mr-2" />
+        <Copy v-else class="h-4 w-4 md:hidden" />
+        <span class="max-md:hidden">{{ t('header.copy') }}</span>
       </Button>
 
-      <!-- 文章信息（移动端隐藏） -->
       <PostInfo class="hidden md:inline-flex" />
 
-      <!-- 样式面板 -->
       <Button
         variant="outline"
-        class="h-9"
+        class="h-9 max-md:w-9 max-md:px-0"
         :class="{ 'bg-accent text-accent-foreground': isOpenRightSlider }"
+        :aria-label="t('header.style')"
         @click="isOpenRightSlider = !isOpenRightSlider"
       >
-        <Palette class="mr-2 h-4 w-4" />
-        <span>样式</span>
+        <Palette class="h-4 w-4 md:hidden" />
+        <span class="max-md:hidden">{{ t('header.style') }}</span>
       </Button>
     </div>
   </header>
 
-  <!-- 对话框组件，嵌套菜单无法正常挂载，需要提取层级 -->
-  <AboutDialog :visible="aboutDialogVisible" @close="aboutDialogVisible = false" />
-  <FundDialog :visible="fundDialogVisible" @close="fundDialogVisible = false" />
-  <EditorStateDialog :visible="editorStateDialogVisible" @close="editorStateDialogVisible = false" />
-  <AIImageGeneratorPanel v-model:open="uiStore.aiImageDialogVisible" />
+  <AboutDialog v-if="isShowAboutDialog" v-model:open="isShowAboutDialog" />
+  <FundDialog v-if="isShowFundDialog" v-model:open="isShowFundDialog" />
+  <EditorStateDialog v-if="isShowEditorStateDialog" v-model:open="isShowEditorStateDialog" />
+  <PreferencesDialog v-model:open="isShowPreferencesDialog" />
+  <MarkdownHelpDialog v-if="isShowMarkdownHelpDialog" v-model:open="isShowMarkdownHelpDialog" />
+  <KeyboardShortcutsDialog v-if="isShowKeyboardShortcutsDialog" v-model:open="isShowKeyboardShortcutsDialog" />
+  <AccountDialog v-if="isShowAccountDialog" v-model:open="isShowAccountDialog" />
+  <SyncDialog v-if="isShowSyncDialog" v-model:open="isShowSyncDialog" />
+  <ShareDialog v-if="isShowShareDialog" v-model:open="isShowShareDialog" />
+  <PdfExportDialog v-if="isShowPdfExportDialog" v-model:open="isShowPdfExportDialog" />
 </template>
 
 <style lang="less" scoped>
@@ -384,9 +378,7 @@ kbd {
   font-weight: 600;
   line-height: 1;
   font-family: ui-monospace, SFMono-Regular, 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
-  box-shadow:
-    0 1px 0 hsl(var(--border)),
-    inset 0 0.5px 0 hsl(var(--background));
+  box-shadow: 0 1px 0 hsl(var(--border)), inset 0 0.5px 0 hsl(var(--background));
   transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
   text-transform: uppercase;
   letter-spacing: 0.025em;

@@ -15,6 +15,7 @@ dist
 # misc
 .DS_Store
 .env.local
+.dev.vars
 .env.development.local
 .env.test.local
 .env.production.local
@@ -42,13 +43,22 @@ public/upload/**
 package-lock.json
 yarn.lock
 # pnpm-lock.yaml
-auto-imports.d.ts
-components.d.ts
+# NOTE: apps/web/auto-imports.d.ts and components.d.ts are committed on
+# purpose — the CI type-check job runs vue-tsc without a prior vite build,
+# so the generated globals must exist in a clean checkout.
 
 .wxt
 .output
 web-ext.config.ts
 .wrangler
+
+# Claude Code local settings
+.claude/settings.local.json
+# Tracked per-skill git symlinks live under .claude/skills/; ignore extras from `npx skills add`
+.claude/skills/*
+!.claude/skills/create-pr
+!.claude/skills/git-commit
+!.claude/skills/wechat-svg
 
 # vite-plugin-pwa dev output
 dev-dist
@@ -56,8 +66,3 @@ dev-dist
 # uTools build artifacts
 apps/utools/dist
 apps/utools/release
-
-# uTools local libs (只在打包时需要，不提交到仓库)
-apps/web/public/static/libs/mathjax
-apps/web/public/static/libs/mermaid
-apps/web/public/static/libs/article-syncjs

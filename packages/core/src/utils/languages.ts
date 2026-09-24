@@ -1,115 +1,56 @@
-import type { LanguageFn } from 'highlight.js'
+import type { HLJSApi, LanguageFn } from 'highlight.js'
 import bash from 'highlight.js/lib/languages/bash'
-import c from 'highlight.js/lib/languages/c'
-import cpp from 'highlight.js/lib/languages/cpp'
-import csharp from 'highlight.js/lib/languages/csharp'
 import css from 'highlight.js/lib/languages/css'
-import diff from 'highlight.js/lib/languages/diff'
-import go from 'highlight.js/lib/languages/go'
-import graphql from 'highlight.js/lib/languages/graphql'
-import ini from 'highlight.js/lib/languages/ini'
-import java from 'highlight.js/lib/languages/java'
 import javascript from 'highlight.js/lib/languages/javascript'
 import json from 'highlight.js/lib/languages/json'
-import kotlin from 'highlight.js/lib/languages/kotlin'
-import less from 'highlight.js/lib/languages/less'
-import lua from 'highlight.js/lib/languages/lua'
-import makefile from 'highlight.js/lib/languages/makefile'
 import markdown from 'highlight.js/lib/languages/markdown'
-import objectivec from 'highlight.js/lib/languages/objectivec'
-import perl from 'highlight.js/lib/languages/perl'
-import php from 'highlight.js/lib/languages/php'
-import phpTemplate from 'highlight.js/lib/languages/php-template'
 import plaintext from 'highlight.js/lib/languages/plaintext'
 import python from 'highlight.js/lib/languages/python'
-import pythonRepl from 'highlight.js/lib/languages/python-repl'
-import r from 'highlight.js/lib/languages/r'
-import ruby from 'highlight.js/lib/languages/ruby'
-import rust from 'highlight.js/lib/languages/rust'
-import scss from 'highlight.js/lib/languages/scss'
 import shell from 'highlight.js/lib/languages/shell'
-import sql from 'highlight.js/lib/languages/sql'
-import swift from 'highlight.js/lib/languages/swift'
 import typescript from 'highlight.js/lib/languages/typescript'
-import vbnet from 'highlight.js/lib/languages/vbnet'
-import wasm from 'highlight.js/lib/languages/wasm'
 import xml from 'highlight.js/lib/languages/xml'
-import yaml from 'highlight.js/lib/languages/yaml'
+import { LRUMap } from './svgCache'
 
+/**
+ * Languages bundled with the renderer. Everything else loads from CDN on first use
+ * via {@link loadAndRegisterLanguage} / {@link highlightPendingBlocks}.
+ */
 export const COMMON_LANGUAGES: Record<string, LanguageFn> = {
   bash,
-  c,
-  cpp,
-  csharp,
   css,
-  diff,
-  go,
-  graphql,
-  ini,
-  java,
   javascript,
   json,
-  kotlin,
-  less,
-  lua,
-  makefile,
   markdown,
-  objectivec,
-  perl,
-  php,
-  'php-template': phpTemplate,
   plaintext,
   python,
-  'python-repl': pythonRepl,
-  r,
-  ruby,
-  rust,
-  scss,
   shell,
-  sql,
-  swift,
   typescript,
-  vbnet,
-  wasm,
   xml,
-  yaml,
 }
 
-// highlight.js CDN 配置
 const HLJS_VERSION = `11.11.1`
 const HLJS_CDN_BASE = `https://cdn-doocs.oss-cn-shenzhen.aliyuncs.com/npm/highlightjs/${HLJS_VERSION}`
 
-// 缓存正在加载的语言
 const loadingLanguages = new Map<string, Promise<void>>()
 
-/**
- * 生成语言包的 CDN URL
- */
 function grammarUrlFor(language: string): string {
   return `${HLJS_CDN_BASE}/es/languages/${language}.min.js`
 }
 
-/**
- * 动态加载并注册语言
- * @param language 语言名称
- * @param hljs highlight.js 实例
- */
-export async function loadAndRegisterLanguage(language: string, hljs: any): Promise<void> {
-  // 如果已经注册，直接返回
+/** Dynamically load and register a highlight.js language grammar from CDN. */
+export async function loadAndRegisterLanguage(language: string, hljs: HLJSApi): Promise<void> {
   if (hljs.getLanguage(language)) {
     return
   }
 
-  // 如果正在加载，等待加载完成
   if (loadingLanguages.has(language)) {
     await loadingLanguages.get(language)
     return
   }
 
-  // 开始加载
   const loadPromise = (async () => {
     try {
-      const module = await import(/* @vite-ignore */ grammarUrlFor(language))
+      const module = await import(/* webpackIgnore: true */ /* @vite-ignore */ grammarUrlFor(language))
       hljs.registerLanguage(language, module.default)
     }
     catch (error) {
@@ -125,23 +66,17 @@ export async function loadAndRegisterLanguage(language: string, hljs: any): Prom
   await loadPromise
 }
 
-/**
- * 格式化高亮后的代码，处理空格和制表符
- */
 function formatHighlightedCode(html: string, preserveNewlines = false): string {
   let formatted = html
-  // 将 span 之间的空格移到 span 内部
+  // Move whitespace between adjacent spans inside the preceding span
   formatted = formatted.replace(/(<span[^>]*>[^<]*<\/span>)(\s+)(<span[^>]*>[^<]*<\/span>)/g, (_: string, span1: string, spaces: string, span2: string) => span1 + span2.replace(/^(<span[^>]*>)/, `$1${spaces}`))
   formatted = formatted.replace(/(\s+)(<span[^>]*>)/g, (_: string, spaces: string, span: string) => span.replace(/^(<span[^>]*>)/, `$1${spaces}`))
-  // 替换制表符为4个空格
   formatted = formatted.replace(/\t/g, `    `)
 
   if (preserveNewlines) {
-    // 替换换行符为 <br/>，并将空格转换为 &nbsp;
     formatted = formatted.replace(/\r\n/g, `<br/>`).replace(/\n/g, `<br/>`).replace(/(>[^<]+)|(^[^<]+)/g, (str: string) => str.replace(/\s/g, `&nbsp;`))
   }
   else {
-    // 只将空格转换为 &nbsp;
     formatted = formatted.replace(/(>[^<]+)|(^[^<]+)/g, (str: string) => str.replace(/\s/g, `&nbsp;`))
   }
 
@@ -149,21 +84,80 @@ function formatHighlightedCode(html: string, preserveNewlines = false): string {
 }
 
 /**
- * 高亮代码并格式化（支持行号）
- * @param text 原始代码文本
- * @param language 语言名称
- * @param hljs highlight.js 实例
- * @param showLineNumber 是否显示行号
- * @returns 格式化后的 HTML
+ * Split highlighted HTML into lines while preserving open <span> context.
+ * highlight.js never splits a span across lines, but newlines may appear inside a span.
  */
-export function highlightAndFormatCode(text: string, language: string, hljs: any, showLineNumber: boolean): string {
+function splitHighlightedHtmlByLines(html: string): string[] {
+  const lines: string[] = []
+  let currentLine = ``
+  const openTags: string[] = []
+
+  let i = 0
+  while (i < html.length) {
+    if (html[i] === `<`) {
+      let tag = `<`
+      i++
+      while (i < html.length && html[i] !== `>`) {
+        tag += html[i]
+        i++
+      }
+      if (i < html.length) {
+        tag += `>`
+        i++
+      }
+
+      currentLine += tag
+
+      if (tag.startsWith(`</span`)) {
+        openTags.pop()
+      }
+      else if (tag.startsWith(`<span`)) {
+        openTags.push(tag)
+      }
+    }
+    else if (html[i] === `\n`) {
+      const closingTags = `</span>`.repeat(openTags.length)
+      lines.push(currentLine + closingTags)
+      currentLine = openTags.join(``)
+      i++
+    }
+    else {
+      currentLine += html[i]
+      i++
+    }
+  }
+
+  lines.push(currentLine)
+  return lines
+}
+
+/**
+ * Highlighting plus the span/whitespace post-processing below is pure, so the
+ * preview's full re-render on every keystroke batch would otherwise re-highlight
+ * every untouched code block.
+ *
+ * Entries hold generated HTML — several times the size of the source, and much
+ * more with line numbers, since every line becomes its own element. The cap only
+ * has to cover the code blocks of the documents in play, so it is kept well
+ * below the point where retained markup becomes noticeable.
+ */
+const highlightCache = new LRUMap<string>(128)
+
+/** Highlight code and format for display, optionally with line numbers. */
+export function highlightAndFormatCode(text: string, language: string, hljs: HLJSApi, showLineNumber: boolean): string {
+  const cacheKey = `${language}\u0000${showLineNumber ? `1` : `0`}\u0000${text}`
+  const cached = highlightCache.get(cacheKey)
+  if (cached !== undefined) {
+    return cached
+  }
+
   let highlighted = ``
 
   if (showLineNumber) {
-    const rawLines = text.replace(/\r\n/g, `\n`).split(`\n`)
+    const normalizedText = text.replace(/\r\n/g, `\n`)
+    const fullHighlighted = hljs.highlight(normalizedText, { language }).value
 
-    const highlightedLines = rawLines.map((lineRaw) => {
-      const lineHtml = hljs.highlight(lineRaw, { language }).value
+    const highlightedLines = splitHighlightedHtmlByLines(fullHighlighted).map((lineHtml) => {
       const formatted = formatHighlightedCode(lineHtml, false)
       return formatted === `` ? `&nbsp;` : formatted
     })
@@ -182,13 +176,27 @@ export function highlightAndFormatCode(text: string, language: string, hljs: any
   }
   else {
     const rawHighlighted = hljs.highlight(text, { language }).value
-    highlighted = formatHighlightedCode(rawHighlighted, true)
+    const formatted = formatHighlightedCode(rawHighlighted, true)
+    // Wrap in one block child: code uses legacy -webkit-box flex; without a single flex item,
+    // some Chromium builds (e.g. Edge) lay out span/<br> siblings horizontally and break line order.
+    // One child keeps <br> line breaks while preserving -webkit-box for WeChat horizontal scroll.
+    highlighted = `<span class="code-block__inner" style="display:block">${formatted}</span>`
   }
 
+  highlightCache.set(cacheKey, highlighted)
   return highlighted
 }
 
-export function highlightCodeBlock(codeBlock: Element, language: string, hljs: any): void {
+/**
+ * Drop memoized highlight output. Not needed for grammar loading — a block
+ * highlighted before its grammar arrives is keyed under `plaintext`, so the
+ * later re-highlight under the real language name misses the cache anyway.
+ */
+export function clearHighlightCache(): void {
+  highlightCache.clear()
+}
+
+export function highlightCodeBlock(codeBlock: Element, language: string, hljs: HLJSApi): void {
   const rawCode = codeBlock.getAttribute(`data-raw-code`)
   const showLineNumber = codeBlock.getAttribute(`data-show-line-number`) === `true`
 
@@ -205,13 +213,8 @@ export function highlightCodeBlock(codeBlock: Element, language: string, hljs: a
   codeBlock.removeAttribute(`data-show-line-number`)
 }
 
-/**
- * 高亮 DOM 中待处理的代码块
- * 查找带有 data-language-pending 属性的代码块，动态加载语言后重新高亮
- * @param hljs highlight.js 实例
- * @param container 容器元素（可选，默认为 document）
- */
-export function highlightPendingBlocks(hljs: any, container: Document | Element = document): void {
+/** Highlight code blocks marked with data-language-pending after loading their grammar. */
+export function highlightPendingBlocks(hljs: HLJSApi, container: Document | Element = document): void {
   const pendingBlocks = container.querySelectorAll(`code[data-language-pending]`)
 
   pendingBlocks.forEach((codeBlock) => {
@@ -220,15 +223,12 @@ export function highlightPendingBlocks(hljs: any, container: Document | Element 
       return
 
     if (hljs.getLanguage(language)) {
-      // 语言已加载，直接高亮
       highlightCodeBlock(codeBlock, language, hljs)
     }
     else {
-      // 动态加载语言后重新高亮
       loadAndRegisterLanguage(language, hljs).then(() => {
         highlightCodeBlock(codeBlock, language, hljs)
       }).catch(() => {
-        // 加载失败，移除标记
         codeBlock.removeAttribute(`data-language-pending`)
         codeBlock.removeAttribute(`data-raw-code`)
         codeBlock.removeAttribute(`data-show-line-number`)

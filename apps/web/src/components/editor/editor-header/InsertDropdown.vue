@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { Contact, Image, Table } from 'lucide-vue-next'
+import { Blocks, FunctionSquare, Image, Smile, Table } from '@lucide/vue'
+import { normalizeFormulaInput } from '@/lib/markdown/formula'
+import { useEditorStore } from '@/stores/editor'
 import { useUIStore } from '@/stores/ui'
 
 const props = withDefaults(defineProps<{
@@ -9,50 +11,74 @@ const props = withDefaults(defineProps<{
 })
 
 const { asSub } = toRefs(props)
+const { t } = useI18n()
 const uiStore = useUIStore()
+const editorStore = useEditorStore()
 
-const { toggleShowInsertFormDialog, toggleShowUploadImgDialog, toggleShowInsertMpCardDialog } = uiStore
+const { openTableEditDialog, toggleShowUploadImgDialog, toggleShowComponentDialog, toggleShowEmojiManager } = uiStore
+
+function openFormulaEditor() {
+  const selection = normalizeFormulaInput(editorStore.getSelection())
+  uiStore.openFormulaEditor({
+    value: selection.latex,
+    displayMode: selection.displayMode,
+  })
+}
 </script>
 
 <template>
-  <!-- 作为 MenubarSub 使用 -->
   <MenubarSub v-if="asSub">
     <MenubarSubTrigger>
-      插入
+      {{ t('menu.insert') }}
     </MenubarSubTrigger>
     <MenubarSubContent class="w-52">
       <MenubarItem @click="toggleShowUploadImgDialog()">
         <Image class="mr-2 h-4 w-4" />
-        插入图片
+        {{ t('menu.image') }}
       </MenubarItem>
-      <MenubarItem @click="toggleShowInsertFormDialog()">
+      <MenubarItem @click="openFormulaEditor()">
+        <FunctionSquare class="mr-2 h-4 w-4" />
+        {{ t('menu.formula') }}
+      </MenubarItem>
+      <MenubarItem @click="openTableEditDialog()">
         <Table class="mr-2 h-4 w-4" />
-        插入表格
+        {{ t('menu.table') }}
       </MenubarItem>
-      <MenubarItem @click="toggleShowInsertMpCardDialog()">
-        <Contact class="mr-2 h-4 w-4" />
-        公众号名片
+      <MenubarItem @click="toggleShowComponentDialog()">
+        <Blocks class="mr-2 h-4 w-4" />
+        {{ t('menu.component') }}
+      </MenubarItem>
+      <MenubarItem @click="toggleShowEmojiManager()">
+        <Smile class="mr-2 h-4 w-4" />
+        {{ t('menu.emoji') }}
       </MenubarItem>
     </MenubarSubContent>
   </MenubarSub>
 
-  <!-- 作为 MenubarMenu 使用（默认） -->
   <MenubarMenu v-else>
     <MenubarTrigger>
-      插入
+      {{ t('menu.insert') }}
     </MenubarTrigger>
     <MenubarContent class="w-52" align="start">
       <MenubarItem @click="toggleShowUploadImgDialog()">
         <Image class="mr-2 h-4 w-4" />
-        插入图片
+        {{ t('menu.image') }}
       </MenubarItem>
-      <MenubarItem @click="toggleShowInsertFormDialog()">
+      <MenubarItem @click="openFormulaEditor()">
+        <FunctionSquare class="mr-2 h-4 w-4" />
+        {{ t('menu.formula') }}
+      </MenubarItem>
+      <MenubarItem @click="openTableEditDialog()">
         <Table class="mr-2 h-4 w-4" />
-        插入表格
+        {{ t('menu.table') }}
       </MenubarItem>
-      <MenubarItem @click="toggleShowInsertMpCardDialog()">
-        <Contact class="mr-2 h-4 w-4" />
-        公众号名片
+      <MenubarItem @click="toggleShowComponentDialog()">
+        <Blocks class="mr-2 h-4 w-4" />
+        {{ t('menu.component') }}
+      </MenubarItem>
+      <MenubarItem @click="toggleShowEmojiManager()">
+        <Smile class="mr-2 h-4 w-4" />
+        {{ t('menu.emoji') }}
       </MenubarItem>
     </MenubarContent>
   </MenubarMenu>

@@ -1,85 +1,127 @@
-import { ref, watch } from 'vue'
-import { store } from '@/utils/storage'
+import { uuidv4 } from '@md/shared/utils/uuid'
+import { computed, ref, watch } from 'vue'
+import { t } from '@/i18n/translate'
+import { store } from '@/storage'
+import { useLocaleStore } from '@/stores/locale'
 
 export interface QuickCommandPersisted {
   id: string
   label: string
-  template: string // 用 {{sel}} 占位
+  template: string // use {{sel}} as selection placeholder
 }
 
 export interface QuickCommandRuntime extends QuickCommandPersisted {
+  builtin: boolean
   buildPrompt: (sel?: string) => string
 }
 
 const STORAGE_KEY = `quick_commands`
 
-// 把持久化的对象转换为可执行的 buildPrompt
-function hydrate(cmd: QuickCommandPersisted): QuickCommandRuntime {
+/** Built-in command ids — labels/templates always resolve from i18n; not editable or removable. */
+export const BUILTIN_QUICK_COMMAND_IDS = [`polish`, `to-en`, `to-zh`, `summary`] as const
+
+const BUILTIN_ID_SET = new Set<string>(BUILTIN_QUICK_COMMAND_IDS)
+
+const BUILTIN_I18N_KEYS: Record<(typeof BUILTIN_QUICK_COMMAND_IDS)[number], { label: string, template: string }> = {
+  'polish': { label: `ai.quickCommand.polish.label`, template: `ai.quickCommand.polish.template` },
+  'to-en': { label: `ai.quickCommand.toEn.label`, template: `ai.quickCommand.toEn.template` },
+  'to-zh': { label: `ai.quickCommand.toZh.label`, template: `ai.quickCommand.toZh.template` },
+  'summary': { label: `ai.quickCommand.summary.label`, template: `ai.quickCommand.summary.template` },
+}
+
+export function isBuiltinQuickCommand(id: string): boolean {
+  return BUILTIN_ID_SET.has(id)
+}
+
+function hydrate(cmd: QuickCommandPersisted, builtin: boolean): QuickCommandRuntime {
   return {
     ...cmd,
+    builtin,
     buildPrompt: (sel = ``) =>
       cmd.template.replace(/\{\{\s*sel\s*\}\}/gi, sel),
   }
 }
 
-// 4 条默认指令
-const DEFAULT_COMMANDS: QuickCommandPersisted[] = [
-  { id: `polish`, label: `润色`, template: `请润色以下内容：\n\n{{sel}}` },
-  { id: `to-en`, label: `翻译成英文`, template: `请将以下内容翻译为英文：\n\n{{sel}}` },
-  { id: `to-zh`, label: `翻译成中文`, template: `Please translate the following content into Chinese:\n\n{{sel}}` },
-  { id: `summary`, label: `总结`, template: `请对以下内容进行总结：\n\n{{sel}}` },
-]
+function getBuiltinCommands(): QuickCommandRuntime[] {
+  return BUILTIN_QUICK_COMMAND_IDS.map((id) => {
+    const keys = BUILTIN_I18N_KEYS[id]
+    return hydrate({ id, label: t(keys.label), template: t(keys.template) }, true)
+  })
+}
 
-export const useQuickCommands = defineStore(`quickCommands`, () => {
-  // ---------- state ----------
-  const commands = ref<QuickCommandRuntime[]>([])
+function normalizeCustom(list: unknown[]): QuickCommandPersisted[] {
+  return list
+    .filter((item): item is QuickCommandPersisted => {
+      if (!item || typeof item !== `object`)
+        return false
+      const cmd = item as Record<string, unknown>
+      return typeof cmd.id === `string`
+        && typeof cmd.label === `string`
+        && typeof cmd.template === `string`
+        && !isBuiltinQuickCommand(cmd.id)
+    })
+    .map(({ id, label, template }) => ({ id, label, template }))
+}
 
-  // ---------- helpers ----------
+export const useQuickCommandsStore = defineStore(`quickCommands`, () => {
+  const localeStore = useLocaleStore()
+  const customCommands = ref<QuickCommandPersisted[]>([])
+
+  // Built-ins always resolve from i18n so they follow the active locale.
+  const commands = computed<QuickCommandRuntime[]>(() => {
+    void localeStore.locale
+    return [
+      ...getBuiltinCommands(),
+      ...customCommands.value.map(cmd => hydrate(cmd, false)),
+    ]
+  })
+
   async function save() {
-    const toSave: QuickCommandPersisted[] = commands.value.map(
-      ({ id, label, template }) => ({ id, label, template }),
-    )
-    await store.setJSON(STORAGE_KEY, toSave)
+    await store.setJSON(STORAGE_KEY, customCommands.value)
   }
 
-  async function load() {
-    const parsed = await store.getJSON<QuickCommandPersisted[]>(STORAGE_KEY)
+  async function reloadFromStorage() {
+    const parsed = await store.getJSON<unknown[]>(STORAGE_KEY)
 
     if (parsed && Array.isArray(parsed)) {
       try {
-        commands.value = parsed.map(hydrate)
+        customCommands.value = normalizeCustom(parsed)
+        // Migrate away from persisting built-in copies (old format stored all commands).
+        await save()
       }
       catch (e) {
-        console.warn(`解析快捷指令失败，已恢复默认值`, e)
-        commands.value = DEFAULT_COMMANDS.map(hydrate)
+        console.warn(t(`ai.quickCommand.parseFailed`), e)
+        customCommands.value = []
         await save()
       }
     }
     else {
-      commands.value = DEFAULT_COMMANDS.map(hydrate)
+      customCommands.value = []
       await save()
     }
   }
 
-  // ---------- CRUD ----------
   function add(label: string, template: string) {
-    const id = crypto.randomUUID()
-    commands.value.push(hydrate({ id, label, template }))
+    const id = uuidv4()
+    customCommands.value.push({ id, label, template })
   }
 
   function update(id: string, label: string, template: string) {
-    const idx = commands.value.findIndex(c => c.id === id)
+    if (isBuiltinQuickCommand(id))
+      return
+    const idx = customCommands.value.findIndex(c => c.id === id)
     if (idx !== -1)
-      commands.value[idx] = hydrate({ id, label, template })
+      customCommands.value[idx] = { id, label, template }
   }
 
   function remove(id: string) {
-    commands.value = commands.value.filter(c => c.id !== id)
+    if (isBuiltinQuickCommand(id))
+      return
+    customCommands.value = customCommands.value.filter(c => c.id !== id)
   }
 
-  // ---------- init ----------
-  load()
-  watch(commands, save, { deep: true })
+  reloadFromStorage()
+  watch(customCommands, save, { deep: true })
 
-  return { commands, add, update, remove }
+  return { commands, add, update, remove, reloadFromStorage }
 })

@@ -1,20 +1,18 @@
 <script setup lang="ts">
 import type {
-  themeMap,
+  ThemeName,
 } from '@md/shared/configs'
 import type { Format } from 'vue-pick-colors'
+import { ALargeSmall, AlignVerticalSpaceAround, Code, Droplet, FileCode, ImageIcon, Link, Palette, Pipette, Quote, RotateCcw, Rows3, SquareCode, Store, Type } from '@lucide/vue'
 import {
   codeBlockThemeOptions,
-  colorOptions,
-  fontFamilyOptions,
-  fontSizeOptions,
-  legendOptions,
-  themeOptions,
 } from '@md/shared/configs'
-import { ALargeSmall, Code, Droplet, FileCode, ImageIcon, Palette, Pipette, RotateCcw, SquareCode, Type } from 'lucide-vue-next'
 import PickColors from 'vue-pick-colors'
-import { useEditorStore } from '@/stores/editor'
-import { useRenderStore } from '@/stores/render'
+import { useEditorRefresh } from '@/composables/useEditorRefresh'
+import { useLocalizedStyleOptions } from '@/composables/useLocalizedStyleOptions'
+import { isMarketplaceUiEnabled } from '@/services/marketplace/client'
+import { useConfirmStore } from '@/stores/confirm'
+import { useCssEditorStore } from '@/stores/cssEditor'
 import { useThemeStore } from '@/stores/theme'
 import { useUIStore } from '@/stores/ui'
 
@@ -25,18 +23,26 @@ const props = withDefaults(defineProps<{
 })
 
 const { asSub } = toRefs(props)
+const { t } = useI18n()
+const localizedStyleOptions = useLocalizedStyleOptions()
 
+const confirmStore = useConfirmStore()
+const cssEditorStore = useCssEditorStore()
 const themeStore = useThemeStore()
 const uiStore = useUIStore()
-const editorStore = useEditorStore()
-const renderStore = useRenderStore()
+const { editorRefresh } = useEditorRefresh()
 
 const { toggleShowCssEditor } = uiStore
+const showMarketplaceUi = isMarketplaceUiEnabled()
 
 const {
   theme,
   fontFamily,
   fontSize,
+  lineHeight,
+  blockSpacing,
+  linkColor,
+  blockquoteBackground,
   primaryColor,
   codeBlockTheme,
   legend,
@@ -44,39 +50,58 @@ const {
 
 const { isDark } = storeToRefs(uiStore)
 
-// Editor refresh function - triggers re-render with current theme settings
-function editorRefresh() {
-  themeStore.updateCodeTheme()
-
-  const raw = editorStore.getContent()
-  renderStore.render(raw)
-}
-
-// Theme change handlers
-function themeChanged(newTheme: keyof typeof themeMap) {
+function themeChanged(newTheme: ThemeName) {
   themeStore.theme = newTheme
-  // 使用新主题系统
+
   themeStore.applyCurrentTheme()
   editorRefresh()
 }
 
 function fontChanged(fonts: string) {
   themeStore.fontFamily = fonts
-  // 使用新主题系统
+
   themeStore.applyCurrentTheme()
   editorRefresh()
 }
 
 function sizeChanged(size: string) {
   themeStore.fontSize = size
-  // 使用新主题系统
+
+  themeStore.applyCurrentTheme()
+  editorRefresh()
+}
+
+function lineHeightChanged(value: string) {
+  themeStore.lineHeight = value
+
+  themeStore.applyCurrentTheme()
+  editorRefresh()
+}
+
+function blockSpacingChanged(value: string) {
+  themeStore.blockSpacing = value
+
+  themeStore.applyCurrentTheme()
+  editorRefresh()
+}
+
+function linkColorChanged(value: string) {
+  themeStore.linkColor = value
+
+  themeStore.applyCurrentTheme()
+  editorRefresh()
+}
+
+function blockquoteBackgroundChanged(value: string) {
+  themeStore.blockquoteBackground = value
+
   themeStore.applyCurrentTheme()
   editorRefresh()
 }
 
 function colorChanged(newColor: string) {
   themeStore.primaryColor = newColor
-  // 使用新主题系统
+
   themeStore.applyCurrentTheme()
   editorRefresh()
 }
@@ -97,7 +122,17 @@ function macCodeBlockChanged() {
 }
 
 function resetStyleConfirm() {
-  uiStore.isOpenConfirmDialog = true
+  confirmStore.confirm({
+    title: t(`confirm.tip`),
+    description: t(`confirm.resetStyleDescription`),
+    onConfirm: () => {
+      themeStore.resetStyle()
+      cssEditorStore.resetCssConfig()
+      themeStore.applyCurrentTheme()
+      editorRefresh()
+      toast.success(t(`toast.styleReset`))
+    },
+  })
 }
 
 const colorPicker = ref<HTMLElement & { show: () => void } | null>(null)
@@ -106,9 +141,12 @@ function showPicker() {
   colorPicker.value?.show()
 }
 
-// 自定义CSS样式
 function customStyle() {
   toggleShowCssEditor()
+}
+
+function openMarketplaceDialog() {
+  uiStore.openMarketplaceDialog({ tab: `theme`, view: `discover` })
 }
 
 const pickColorsContainer = useTemplateRef(`pickColorsContainer`)
@@ -117,51 +155,89 @@ const formatOptions = ref<Format[]>([`rgb`, `hex`, `hsl`, `hsv`])
 </script>
 
 <template>
-  <!-- 作为 MenubarSub 使用 -->
   <MenubarSub v-if="asSub">
     <MenubarSubTrigger>
-      样式
+      {{ t('menu.style') }}
     </MenubarSubTrigger>
-    <MenubarSubContent class="w-56">
+    <MenubarSubContent class="min-w-56 max-h-56 overflow-auto">
       <StyleOptionMenu
-        title="主题"
-        :options="themeOptions"
+        :title="t('menu.theme')"
+        :options="localizedStyleOptions.themeOptions"
         :current="theme"
         :change="themeChanged"
         :icon="Palette"
       />
+      <MenubarItem v-if="showMarketplaceUi" class="pl-2" @click="openMarketplaceDialog()">
+        <Store class="mr-2 h-4 w-4" />
+        {{ t('menu.marketplace') }}
+      </MenubarItem>
       <MenubarSeparator />
       <StyleOptionMenu
-        title="字体"
-        :options="fontFamilyOptions"
+        :title="t('menu.font')"
+        style-key="font"
+        :options="localizedStyleOptions.fontFamilyOptions"
         :current="fontFamily"
         :change="fontChanged"
         :icon="Type"
       />
       <StyleOptionMenu
-        title="字号"
-        :options="fontSizeOptions"
+        :title="t('menu.fontSize')"
+        style-key="fontSize"
+        :options="localizedStyleOptions.fontSizeOptions"
         :current="fontSize"
         :change="sizeChanged"
         :icon="ALargeSmall"
       />
       <StyleOptionMenu
-        title="主题色"
-        :options="colorOptions"
+        :title="t('menu.lineHeight')"
+        style-key="lineHeight"
+        :options="localizedStyleOptions.lineHeightOptions"
+        :current="lineHeight"
+        :change="lineHeightChanged"
+        :icon="Rows3"
+      />
+      <StyleOptionMenu
+        :title="t('menu.blockSpacing')"
+        style-key="blockSpacing"
+        :options="localizedStyleOptions.blockSpacingOptions"
+        :current="blockSpacing"
+        :change="blockSpacingChanged"
+        :icon="AlignVerticalSpaceAround"
+      />
+      <StyleOptionMenu
+        :title="t('menu.primaryColor')"
+        style-key="color"
+        :options="localizedStyleOptions.colorOptions"
         :current="primaryColor"
         :change="colorChanged"
         :icon="Droplet"
       />
       <StyleOptionMenu
-        title="代码块主题"
+        :title="t('menu.linkColor')"
+        style-key="linkColor"
+        :options="localizedStyleOptions.linkColorOptions"
+        :current="linkColor"
+        :change="linkColorChanged"
+        :icon="Link"
+      />
+      <StyleOptionMenu
+        :title="t('menu.blockquoteBackground')"
+        style-key="blockquoteBackground"
+        :options="localizedStyleOptions.blockquoteBackgroundOptions"
+        :current="blockquoteBackground"
+        :change="blockquoteBackgroundChanged"
+        :icon="Quote"
+      />
+      <StyleOptionMenu
+        :title="t('menu.codeBlockTheme')"
         :options="codeBlockThemeOptions"
         :current="codeBlockTheme"
         :change="codeBlockThemeChanged"
         :icon="Code"
       />
       <StyleOptionMenu
-        title="图注格式"
-        :options="legendOptions"
+        :title="t('menu.legendFormat')"
+        :options="localizedStyleOptions.legendOptions"
         :current="legend"
         :change="legendChanged"
         :icon="ImageIcon"
@@ -171,7 +247,7 @@ const formatOptions = ref<Format[]>([`rgb`, `hex`, `hsl`, `hsv`])
         <HoverCard :open-delay="100">
           <HoverCardTrigger class="w-full flex">
             <Pipette class="mr-2 h-4 w-4" />
-            自定义主题色
+            {{ t('menu.customPrimaryColor') }}
           </HoverCardTrigger>
           <HoverCardContent side="right" class="w-min">
             <div ref="pickColorsContainer">
@@ -189,66 +265,104 @@ const formatOptions = ref<Format[]>([`rgb`, `hex`, `hsl`, `hsv`])
       </MenubarCheckboxItem>
       <MenubarCheckboxItem class="pl-2" @click="customStyle">
         <FileCode class="mr-2 h-4 w-4" />
-        自定义 CSS
+        {{ t('menu.customCss') }}
       </MenubarCheckboxItem>
       <MenubarSeparator />
       <MenubarCheckboxItem class="pl-2" @click="macCodeBlockChanged">
         <SquareCode class="mr-2 h-4 w-4" />
-        Mac 代码块
+        {{ t('menu.macCodeBlock') }}
       </MenubarCheckboxItem>
       <MenubarSeparator />
       <MenubarCheckboxItem class="pl-2" divided @click="resetStyleConfirm">
         <RotateCcw class="mr-2 h-4 w-4" />
-        重置
+        {{ t('menu.reset') }}
       </MenubarCheckboxItem>
     </MenubarSubContent>
   </MenubarSub>
 
-  <!-- 作为 MenubarMenu 使用（默认） -->
   <MenubarMenu v-else>
     <MenubarTrigger>
-      样式
+      {{ t('menu.style') }}
     </MenubarTrigger>
-    <MenubarContent class="w-56" align="start">
+    <MenubarContent class="min-w-56" align="start">
       <StyleOptionMenu
-        title="主题"
-        :options="themeOptions"
+        :title="t('menu.theme')"
+        :options="localizedStyleOptions.themeOptions"
         :current="theme"
         :change="themeChanged"
         :icon="Palette"
       />
+      <MenubarItem v-if="showMarketplaceUi" class="pl-2" @click="openMarketplaceDialog()">
+        <Store class="mr-2 h-4 w-4" />
+        {{ t('menu.marketplace') }}
+      </MenubarItem>
       <MenubarSeparator />
       <StyleOptionMenu
-        title="字体"
-        :options="fontFamilyOptions"
+        :title="t('menu.font')"
+        style-key="font"
+        :options="localizedStyleOptions.fontFamilyOptions"
         :current="fontFamily"
         :change="fontChanged"
         :icon="Type"
       />
       <StyleOptionMenu
-        title="字号"
-        :options="fontSizeOptions"
+        :title="t('menu.fontSize')"
+        style-key="fontSize"
+        :options="localizedStyleOptions.fontSizeOptions"
         :current="fontSize"
         :change="sizeChanged"
         :icon="ALargeSmall"
       />
       <StyleOptionMenu
-        title="主题色"
-        :options="colorOptions"
+        :title="t('menu.lineHeight')"
+        style-key="lineHeight"
+        :options="localizedStyleOptions.lineHeightOptions"
+        :current="lineHeight"
+        :change="lineHeightChanged"
+        :icon="Rows3"
+      />
+      <StyleOptionMenu
+        :title="t('menu.blockSpacing')"
+        style-key="blockSpacing"
+        :options="localizedStyleOptions.blockSpacingOptions"
+        :current="blockSpacing"
+        :change="blockSpacingChanged"
+        :icon="AlignVerticalSpaceAround"
+      />
+      <StyleOptionMenu
+        :title="t('menu.primaryColor')"
+        style-key="color"
+        :options="localizedStyleOptions.colorOptions"
         :current="primaryColor"
         :change="colorChanged"
         :icon="Droplet"
       />
       <StyleOptionMenu
-        title="代码块主题"
+        :title="t('menu.linkColor')"
+        style-key="linkColor"
+        :options="localizedStyleOptions.linkColorOptions"
+        :current="linkColor"
+        :change="linkColorChanged"
+        :icon="Link"
+      />
+      <StyleOptionMenu
+        :title="t('menu.blockquoteBackground')"
+        style-key="blockquoteBackground"
+        :options="localizedStyleOptions.blockquoteBackgroundOptions"
+        :current="blockquoteBackground"
+        :change="blockquoteBackgroundChanged"
+        :icon="Quote"
+      />
+      <StyleOptionMenu
+        :title="t('menu.codeBlockTheme')"
         :options="codeBlockThemeOptions"
         :current="codeBlockTheme"
         :change="codeBlockThemeChanged"
         :icon="Code"
       />
       <StyleOptionMenu
-        title="图注格式"
-        :options="legendOptions"
+        :title="t('menu.legendFormat')"
+        :options="localizedStyleOptions.legendOptions"
         :current="legend"
         :change="legendChanged"
         :icon="ImageIcon"
@@ -258,7 +372,7 @@ const formatOptions = ref<Format[]>([`rgb`, `hex`, `hsl`, `hsv`])
         <HoverCard :open-delay="100">
           <HoverCardTrigger class="w-full flex">
             <Pipette class="mr-2 h-4 w-4" />
-            自定义主题色
+            {{ t('menu.customPrimaryColor') }}
           </HoverCardTrigger>
           <HoverCardContent side="right" class="w-min">
             <div ref="pickColorsContainer">
@@ -276,17 +390,17 @@ const formatOptions = ref<Format[]>([`rgb`, `hex`, `hsl`, `hsv`])
       </MenubarCheckboxItem>
       <MenubarCheckboxItem class="pl-2" @click="customStyle">
         <FileCode class="mr-2 h-4 w-4" />
-        自定义 CSS
+        {{ t('menu.customCss') }}
       </MenubarCheckboxItem>
       <MenubarSeparator />
       <MenubarCheckboxItem class="pl-2" @click="macCodeBlockChanged">
         <SquareCode class="mr-2 h-4 w-4" />
-        Mac 代码块
+        {{ t('menu.macCodeBlock') }}
       </MenubarCheckboxItem>
       <MenubarSeparator />
       <MenubarCheckboxItem class="pl-2" divided @click="resetStyleConfirm">
         <RotateCcw class="mr-2 h-4 w-4" />
-        重置
+        {{ t('menu.reset') }}
       </MenubarCheckboxItem>
     </MenubarContent>
   </MenubarMenu>

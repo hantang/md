@@ -1,82 +1,188 @@
-import { addPrefix } from '@/utils'
-import { store } from '@/utils/storage'
+import type { PdfExportOptions } from '@/services/export'
+import { DEFAULT_PDF_EXPORT_OPTIONS, normalizePdfExportOptions } from '@/services/export'
+import { store } from '@/storage'
+import { addPrefix } from '@/storage/prefix'
 
-/**
- * UI 状态 Store
- * 负责管理全局 UI 状态，包括深色模式、侧边栏、对话框等
- */
+/** Global UI state: dark mode, sidebars, dialogs, view mode, etc. */
 export const useUIStore = defineStore(`ui`, () => {
-  // ==================== 全局 UI 状态 ====================
-  // 是否开启深色模式
   const isDark = useDark()
   const toggleDark = useToggle(isDark)
 
-  // 是否在左侧编辑
-  const isEditOnLeft = store.reactive(`isEditOnLeft`, true)
-  const toggleEditOnLeft = useToggle(isEditOnLeft)
-
-  // 是否开启 AI 工具箱
   const showAIToolbox = store.reactive(`showAIToolbox`, true)
   const toggleAIToolbox = useToggle(showAIToolbox)
 
-  // 是否已经显示过 AI 工具箱选中文本提示
   const hasShownAIToolboxHint = store.reactive(`hasShownAIToolboxHint`, false)
 
-  // 是否打开右侧滑块
   const isOpenRightSlider = store.reactive(addPrefix(`is_open_right_slider`), false)
 
-  // 是否打开文章列表滑块
   const isOpenPostSlider = store.reactive(addPrefix(`is_open_post_slider`), false)
 
-  // 是否打开本地文件夹面板
   const isOpenFolderPanel = store.reactive(addPrefix(`is_open_folder_panel`), false)
 
-  // 是否为移动端
+  const isOpenEmojiManager = store.reactive(addPrefix(`is_open_emoji_manager`), false)
+  const toggleShowEmojiManager = useToggle(isOpenEmojiManager)
+
   const isMobile = store.reactive(`isMobile`, false)
 
-  // 是否固定显示浮动目录
-  const isPinFloatingToc = store.reactive(addPrefix(`isPinFloatingToc`), false)
-  const togglePinFloatingToc = useToggle(isPinFloatingToc)
+  // viewMode: edit | split | preview
+  const viewMode = store.reactive<'edit' | 'split' | 'preview'>(`viewMode`, `split`)
 
-  // 是否显示浮动目录
-  const isShowFloatingToc = store.reactive(addPrefix(`isShowFloatingToc`), true)
-  const toggleShowFloatingToc = useToggle(isShowFloatingToc)
+  function setViewMode(mode: 'edit' | 'split' | 'preview') {
+    viewMode.value = mode
+  }
 
-  // 是否启用图片转存（默认关闭）
+  // previewDevice: desktop | mobile (simulated)
+  const previewDevice = store.reactive<'desktop' | 'mobile'>(`previewDevice`, `mobile`)
+
+  function setPreviewDevice(device: 'desktop' | 'mobile') {
+    previewDevice.value = device
+  }
+
+  function togglePreviewDevice() {
+    previewDevice.value = previewDevice.value === `desktop` ? `mobile` : `desktop`
+  }
+
   const enableImageReupload = store.reactive(addPrefix(`enableImageReupload`), false)
   const toggleImageReupload = useToggle(enableImageReupload)
 
-  // ==================== 对话框状态 ====================
-  // 是否展示 CSS 编辑器
+  const enableScrollSync = store.reactive(addPrefix(`enableScrollSync`), true)
+  const toggleScrollSync = useToggle(enableScrollSync)
+
+  const copyMode = store.reactive(addPrefix(`copyMode`), `txt`)
+
   const isShowCssEditor = store.reactive(`isShowCssEditor`, false)
   const toggleShowCssEditor = useToggle(isShowCssEditor)
 
-  // 是否展示插入表格对话框
-  const isShowInsertFormDialog = ref(false)
-  const toggleShowInsertFormDialog = useToggle(isShowInsertFormDialog)
+  const isShowTableEditDialog = ref(false)
 
-  // 是否展示插入公众号名片对话框
-  const isShowInsertMpCardDialog = ref(false)
-  const toggleShowInsertMpCardDialog = useToggle(isShowInsertMpCardDialog)
+  function openTableEditDialog() {
+    isShowTableEditDialog.value = true
+  }
 
-  // 是否展示上传图片对话框
+  function closeTableEditDialog() {
+    isShowTableEditDialog.value = false
+  }
+
   const isShowUploadImgDialog = ref(false)
   const toggleShowUploadImgDialog = useToggle(isShowUploadImgDialog)
 
-  // 是否展示导入 Markdown 对话框
+  const isShowFormulaEditorDialog = ref(false)
+  const formulaEditorValue = ref(``)
+  const formulaEditorDisplayMode = ref(true)
+  const formulaEditorSourceRaw = ref<string | null>(null)
+
+  function openFormulaEditor(options: {
+    value?: string
+    displayMode?: boolean
+    sourceRaw?: string | null
+  } = {}) {
+    formulaEditorValue.value = options.value ?? ``
+    formulaEditorDisplayMode.value = options.displayMode ?? true
+    formulaEditorSourceRaw.value = options.sourceRaw ?? null
+    isShowFormulaEditorDialog.value = true
+  }
+
+  function closeFormulaEditor() {
+    isShowFormulaEditorDialog.value = false
+    formulaEditorValue.value = ``
+    formulaEditorDisplayMode.value = true
+    formulaEditorSourceRaw.value = null
+  }
+
   const isShowImportMdDialog = ref(false)
   const toggleShowImportMdDialog = useToggle(isShowImportMdDialog)
-  /** 通过 URL 参数 open 打开时传入的待导入链接，对话框打开后会据此自动执行导入 */
+  /** URL from ?open= query; import dialog auto-imports when opened with this set. */
   const importMdOpenUrl = ref<string | null>(null)
 
-  // 是否展示模板管理对话框
+  const isShowLocalImageUpload = ref(false)
+  const toggleShowLocalImageUpload = useToggle(isShowLocalImageUpload)
+  /** Pending local image upload batch data. */
+  const localImageUploadData = ref<{
+    markdownContent: string
+    detectedPaths: string[]
+    processed?: boolean
+    skipUpload?: boolean
+    successCount?: number
+    failCount?: number
+  } | null>(null)
+
   const isShowTemplateDialog = ref(false)
   const toggleShowTemplateDialog = useToggle(isShowTemplateDialog)
 
-  // 是否打开重置样式确认对话框
-  const isOpenConfirmDialog = ref(false)
+  const isShowComponentDialog = ref(false)
+  const toggleShowComponentDialog = useToggle(isShowComponentDialog)
 
-  // AI 对话框
+  const isShowMarketplaceDialog = ref(false)
+  const marketplaceDialogTab = ref<`theme` | `component`>(`theme`)
+  const marketplaceDialogView = ref<`discover` | `installed` | `mine` | `admin` | `publish`>(`discover`)
+
+  function openMarketplaceDialog(options?: {
+    tab?: `theme` | `component`
+    view?: `discover` | `installed` | `mine` | `admin` | `publish`
+  }) {
+    // Component marketplace UI is temporarily disabled; always open themes.
+    void options?.tab
+    marketplaceDialogTab.value = `theme`
+    marketplaceDialogView.value = options?.view ?? `discover`
+    isShowMarketplaceDialog.value = true
+  }
+
+  const isShowSyncDialog = ref(false)
+  const toggleShowSyncDialog = useToggle(isShowSyncDialog)
+
+  const isShowAccountDialog = ref(false)
+  const toggleShowAccountDialog = useToggle(isShowAccountDialog)
+
+  const isShowShareDialog = ref(false)
+  const shareDialogInitialTab = ref<`create` | `manage`>(`create`)
+
+  function openShareDialog(options?: { tab?: `create` | `manage` }) {
+    shareDialogInitialTab.value = options?.tab ?? `create`
+    isShowShareDialog.value = true
+  }
+
+  const isShowPdfExportDialog = ref(false)
+
+  const pdfExportOptions = store.reactive<PdfExportOptions>(
+    `pdfExportOptions`,
+    { ...DEFAULT_PDF_EXPORT_OPTIONS },
+  )
+
+  function openPdfExportDialog() {
+    // Drop legacy fields (e.g. paperSize) and backfill newly added keys.
+    pdfExportOptions.value = normalizePdfExportOptions(pdfExportOptions.value)
+    isShowPdfExportDialog.value = true
+  }
+
+  const isShowAboutDialog = ref(false)
+  const toggleShowAboutDialog = useToggle(isShowAboutDialog)
+
+  const isShowFundDialog = ref(false)
+  const toggleShowFundDialog = useToggle(isShowFundDialog)
+
+  const isShowMarkdownHelpDialog = ref(false)
+  const toggleShowMarkdownHelpDialog = useToggle(isShowMarkdownHelpDialog)
+
+  const isShowEditorStateDialog = ref(false)
+  const toggleShowEditorStateDialog = useToggle(isShowEditorStateDialog)
+
+  const isShowPreferencesDialog = ref(false)
+  const toggleShowPreferencesDialog = useToggle(isShowPreferencesDialog)
+
+  const isShowKeyboardShortcutsDialog = ref(false)
+  const toggleShowKeyboardShortcutsDialog = useToggle(isShowKeyboardShortcutsDialog)
+
+  const isShowCommandPalette = ref(false)
+  const toggleShowCommandPalette = useToggle(isShowCommandPalette)
+
+  /** Component name to expand when opening the component dialog (e.g. 'MpProfile'). */
+  const componentDialogTarget = ref<string | null>(null)
+
+  function openComponentDialogWithTarget(target: string) {
+    componentDialogTarget.value = target
+    isShowComponentDialog.value = true
+  }
+
   const aiDialogVisible = ref(false)
   const aiImageDialogVisible = ref(false)
 
@@ -88,7 +194,6 @@ export const useUIStore = defineStore(`ui`, () => {
     aiImageDialogVisible.value = value ?? !aiImageDialogVisible.value
   }
 
-  // 搜索面板状态
   const searchTabRequest = ref<{ word: string, showReplace: boolean } | null>(null)
 
   function openSearchTab(searchWord: string = '', showReplace: boolean = false) {
@@ -99,10 +204,29 @@ export const useUIStore = defineStore(`ui`, () => {
     searchTabRequest.value = null
   }
 
-  // ==================== 工具函数 ====================
-  // 处理窗口大小变化
+  /** Incremented to request go-to-line from Footer. */
+  const goToLineRequest = ref(0)
+
+  function requestGoToLine() {
+    goToLineRequest.value++
+  }
+
+  let splitCollapsedByResize = false
+
   function handleResize() {
+    const wasMobile = isMobile.value
     isMobile.value = window.innerWidth <= 768
+
+    if (!wasMobile && isMobile.value && viewMode.value === `split`) {
+      // Desktop → mobile while split: collapse to edit and remember for restore
+      viewMode.value = `edit`
+      splitCollapsedByResize = true
+    }
+    else if (wasMobile && !isMobile.value && splitCollapsedByResize) {
+      // Mobile → desktop after resize collapse: restore split
+      viewMode.value = `split`
+      splitCollapsedByResize = false
+    }
   }
 
   onMounted(() => {
@@ -115,50 +239,91 @@ export const useUIStore = defineStore(`ui`, () => {
   })
 
   return {
-    // ==================== 全局 UI 状态 ====================
     isDark,
-    isEditOnLeft,
     showAIToolbox,
     hasShownAIToolboxHint,
     isOpenRightSlider,
     isOpenPostSlider,
     isMobile,
-    isPinFloatingToc,
-    isShowFloatingToc,
+    viewMode,
+    previewDevice,
     isOpenFolderPanel,
+    isOpenEmojiManager,
     enableImageReupload,
+    enableScrollSync,
+    copyMode,
 
-    // ==================== 对话框状态 ====================
     isShowCssEditor,
     toggleShowCssEditor,
-    isShowInsertFormDialog,
-    toggleShowInsertFormDialog,
-    isShowInsertMpCardDialog,
-    toggleShowInsertMpCardDialog,
+    isShowTableEditDialog,
+    openTableEditDialog,
+    closeTableEditDialog,
     isShowUploadImgDialog,
     toggleShowUploadImgDialog,
+    isShowFormulaEditorDialog,
+    formulaEditorValue,
+    formulaEditorDisplayMode,
+    formulaEditorSourceRaw,
+    openFormulaEditor,
+    closeFormulaEditor,
     isShowImportMdDialog,
     toggleShowImportMdDialog,
     importMdOpenUrl,
+    isShowLocalImageUpload,
+    toggleShowLocalImageUpload,
+    localImageUploadData,
     isShowTemplateDialog,
     toggleShowTemplateDialog,
-    isOpenConfirmDialog,
+    isShowComponentDialog,
+    toggleShowComponentDialog,
+    isShowMarketplaceDialog,
+    marketplaceDialogTab,
+    marketplaceDialogView,
+    openMarketplaceDialog,
+    isShowSyncDialog,
+    toggleShowSyncDialog,
+    isShowAccountDialog,
+    toggleShowAccountDialog,
+    isShowShareDialog,
+    shareDialogInitialTab,
+    openShareDialog,
+    isShowPdfExportDialog,
+    openPdfExportDialog,
+    pdfExportOptions,
+    isShowAboutDialog,
+    toggleShowAboutDialog,
+    isShowFundDialog,
+    toggleShowFundDialog,
+    isShowMarkdownHelpDialog,
+    toggleShowMarkdownHelpDialog,
+    isShowEditorStateDialog,
+    toggleShowEditorStateDialog,
+    isShowPreferencesDialog,
+    toggleShowPreferencesDialog,
+    isShowKeyboardShortcutsDialog,
+    toggleShowKeyboardShortcutsDialog,
+    isShowCommandPalette,
+    toggleShowCommandPalette,
+    componentDialogTarget,
+    openComponentDialogWithTarget,
     aiDialogVisible,
     toggleAIDialog,
     aiImageDialogVisible,
     toggleAIImageDialog,
 
-    // ==================== 搜索面板 ====================
     searchTabRequest,
     openSearchTab,
     clearSearchTabRequest,
+    goToLineRequest,
+    requestGoToLine,
 
-    // ==================== Actions ====================
     toggleDark,
-    toggleEditOnLeft,
     toggleAIToolbox,
-    togglePinFloatingToc,
-    toggleShowFloatingToc,
     toggleImageReupload,
+    toggleScrollSync,
+    toggleShowEmojiManager,
+    setViewMode,
+    setPreviewDevice,
+    togglePreviewDevice,
   }
 })

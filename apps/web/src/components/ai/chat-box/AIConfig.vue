@@ -1,64 +1,69 @@
 <script setup lang="ts">
-import { serviceOptions } from '@md/shared/configs'
+import { Info } from '@lucide/vue'
 import { DEFAULT_SERVICE_TYPE } from '@md/shared/constants'
-import { Info } from 'lucide-vue-next'
+import AIModelPicker from '@/components/ai/AIModelPicker.vue'
 import { PasswordInput } from '@/components/ui/password-input'
+import { buildAIHeaders, resolveEndpointUrl, useAIFetch } from '@/composables/useAIFetch'
+import { useDiscoverAIModels } from '@/composables/useDiscoverAIModels'
+import { useLocalizedAIServiceOptions } from '@/composables/useLocalizedAIServices'
 import useAIConfigStore from '@/stores/aiConfig'
-
-/* -------------------------- 基础数据 -------------------------- */
 
 const emit = defineEmits([`saved`])
 
 const AIConfigStore = useAIConfigStore()
 const { type, endpoint, model, apiKey, temperature, maxToken } = storeToRefs(AIConfigStore)
+const { t } = useI18n()
 
-/** UI 状态 */
-const loading = ref(false)
+const { loading, fetchJSON } = useAIFetch()
 const testResult = ref(``)
+const {
+  discoveredModels,
+  discovering,
+  canDiscover,
+  discover,
+  resetDiscovered,
+} = useDiscoverAIModels({
+  endpoint,
+  apiKey,
+  serviceType: type,
+  kind: `chat`,
+})
+const localizedAIServices = useLocalizedAIServiceOptions()
 
-/** 当前服务信息 */
 const currentService = computed(
-  () => serviceOptions.find(s => s.value === type.value) || serviceOptions[0],
+  () => localizedAIServices.value.serviceOptions.find(s => s.value === type.value)
+    || localizedAIServices.value.serviceOptions[0],
 )
 
-/* -------------------------- 监听 -------------------------- */
-
-// 监听服务类型变化，清空测试结果
 watch(type, () => {
   testResult.value = ``
 })
 
-// 监听模型变化，清空测试结果
 watch(model, () => {
   testResult.value = ``
 })
 
-/* -------------------------- 操作 -------------------------- */
-
 function saveConfig(emitEvent = true) {
   if (emitEvent) {
-    testResult.value = `✅ 配置已保存`
+    testResult.value = t('ai.config.saved')
     emit(`saved`)
   }
 }
 
 function clearConfig() {
+  resetDiscovered()
   AIConfigStore.reset()
-  testResult.value = `🗑️ 当前 AI 配置已清除`
+  testResult.value = t('ai.config.cleared')
 }
 
 async function testConnection() {
   testResult.value = ``
   loading.value = true
 
-  const headers: Record<string, string> = { 'Content-Type': `application/json` }
-  if (apiKey.value && type.value !== DEFAULT_SERVICE_TYPE)
-    headers.Authorization = `Bearer ${apiKey.value}`
+  const headers = buildAIHeaders(apiKey.value, type.value)
 
   try {
-    const url = new URL(endpoint.value)
-    if (!url.pathname.endsWith(`/chat/completions`))
-      url.pathname = url.pathname.replace(/\/?$/, `/chat/completions`)
+    const url = resolveEndpointUrl(endpoint.value, `chat`)
 
     const payload = {
       model: model.value,
@@ -68,52 +73,53 @@ async function testConnection() {
       stream: false,
     }
 
-    const res = await window.fetch(url.toString(), {
-      method: `POST`,
-      headers,
-      body: JSON.stringify(payload),
-    })
+    const res = await fetchJSON(url, headers, payload)
 
     if (res.ok) {
-      testResult.value = `✅ 测试成功，/chat/completions 可用`
+      testResult.value = t('ai.config.testSuccess')
       saveConfig(false)
     }
     else {
-      const text = await res.text()
       try {
-        const { error } = JSON.parse(text)
+        const { error } = JSON.parse(res.errorText)
         if (
           res.status === 404
           && (error?.code === `ModelNotOpen`
             || /not activated|未开通/i.test(error?.message))
         ) {
-          testResult.value = `⚠️ 测试成功，但当前模型未开通：${model.value}`
+          testResult.value = t('ai.config.modelNotActivated', { model: model.value })
           saveConfig(false)
           return
         }
       }
       catch {}
-      testResult.value = `❌ 测试失败：${res.status} ${res.statusText}，${text}`
+      testResult.value = t('ai.config.testFailed', { status: res.status, statusText: res.statusText, errorText: res.errorText })
     }
   }
   catch (err) {
-    testResult.value = `❌ 测试失败：${(err as Error).message}`
+    testResult.value = t('ai.config.testFailedMessage', { message: (err as Error).message })
   }
   finally {
     loading.value = false
   }
 }
+
+async function discoverModels() {
+  testResult.value = ``
+  const message = await discover()
+  if (message)
+    testResult.value = message
+}
 </script>
 
 <template>
-  <div class="custom-scroll space-y-4 max-h-[calc(100dvh-10rem)] overflow-y-auto pr-1 text-xs sm:max-h-none sm:text-sm">
+  <div class="custom-scroll space-y-4 max-h-[calc(100dvh-10rem)] overflow-y-auto text-xs sm:max-h-none sm:text-sm">
     <div class="font-medium">
-      AI 配置
+      {{ t('ai.config.title') }}
     </div>
 
-    <!-- 服务类型 -->
     <div>
-      <Label class="mb-1 block text-sm font-medium">服务类型</Label>
+      <Label class="mb-1 block text-sm font-medium">{{ t('ai.config.serviceType') }}</Label>
       <Select v-model="type">
         <SelectTrigger class="w-full">
           <SelectValue>
@@ -122,7 +128,7 @@ async function testConnection() {
         </SelectTrigger>
         <SelectContent>
           <SelectItem
-            v-for="service in serviceOptions"
+            v-for="service in localizedAIServices.serviceOptions"
             :key="service.value"
             :value="service.value"
           >
@@ -132,64 +138,52 @@ async function testConnection() {
       </Select>
     </div>
 
-    <!-- API 端点 -->
     <div v-if="type !== DEFAULT_SERVICE_TYPE">
-      <Label class="mb-1 block text-sm font-medium">API 端点</Label>
+      <Label class="mb-1 block text-sm font-medium">{{ t('ai.config.apiEndpoint') }}</Label>
       <Input
         v-model="endpoint"
-        placeholder="输入 API 端点 URL"
+        :placeholder="t('ai.config.apiEndpointPlaceholder')"
         class="focus:border-gray-400 focus:ring-1 focus:ring-gray-300"
       />
     </div>
 
-    <!-- API 密钥，仅非 default 显示 -->
     <div v-if="type !== DEFAULT_SERVICE_TYPE">
-      <Label class="mb-1 block text-sm font-medium">API 密钥</Label>
+      <Label class="mb-1 block text-sm font-medium">{{ t('ai.config.apiKey') }}</Label>
       <PasswordInput
         v-model="apiKey"
-        placeholder="sk-..."
+        :placeholder="t('ai.config.apiKeyPlaceholder')"
         class="focus:border-gray-400 focus:ring-1 focus:ring-gray-300"
       />
     </div>
 
-    <!-- 模型名称 -->
     <div>
-      <Label class="mb-1 block text-sm font-medium">模型名称</Label>
-      <Select v-if="currentService.models.length > 0" v-model="model">
-        <SelectTrigger class="w-full">
-          <SelectValue>
-            {{ model || '请选择模型' }}
-          </SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem
-            v-for="_model in currentService.models"
-            :key="_model"
-            :value="_model"
-          >
-            {{ _model }}
-          </SelectItem>
-        </SelectContent>
-      </Select>
-      <Input
-        v-else
+      <Label class="mb-1 block text-sm font-medium">{{ t('ai.config.modelName') }}</Label>
+      <AIModelPicker
         v-model="model"
-        placeholder="输入模型名称"
-        class="focus:border-gray-400 focus:ring-1 focus:ring-gray-300"
+        :preset-models="currentService.models"
+        :discovered-models="discoveredModels"
+        :placeholder="t('ai.config.modelPlaceholder')"
+        :select-placeholder="t('ai.config.selectModel')"
+        :discover-label="t('ai.config.discoverModels')"
+        :discovering-label="t('ai.config.discoveringModels')"
+        :need-config-label="t('ai.config.discoverModelsNeedConfig')"
+        :discovering="discovering"
+        :can-discover="canDiscover"
+        :show-discover="type !== DEFAULT_SERVICE_TYPE"
+        @discover="discoverModels"
       />
     </div>
 
-    <!-- 温度 temperature -->
     <div>
       <Label class="mb-1 flex items-center gap-1 text-sm font-medium">
-        温度
+        {{ t('ai.config.temperature') }}
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger as-child>
               <Info class="text-gray-500" :size="16" />
             </TooltipTrigger>
             <TooltipContent side="top" class="z-[250]">
-              <div>控制输出的随机性：较小值使输出更确定，较大值使其更随机。</div>
+              <div>{{ t('ai.config.temperatureHint') }}</div>
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>
@@ -200,31 +194,29 @@ async function testConnection() {
         step="0.1"
         min="0"
         max="2"
-        placeholder="0 ~ 2，默认 1"
+        :placeholder="t('ai.config.temperaturePlaceholder')"
         class="focus:border-gray-400 focus:ring-1 focus:ring-gray-300"
       />
     </div>
 
-    <!-- 最大 Token 数 -->
     <div>
-      <Label class="mb-1 block text-sm font-medium">最大 Token 数</Label>
+      <Label class="mb-1 block text-sm font-medium">{{ t('ai.config.maxTokens') }}</Label>
       <Input
         v-model.number="maxToken"
         type="number"
         min="1"
         max="32768"
-        placeholder="比如 1024"
+        :placeholder="t('ai.config.maxTokensPlaceholder')"
         class="focus:border-gray-400 focus:ring-1 focus:ring-gray-300"
       />
     </div>
 
-    <!-- 操作按钮区域 -->
     <div class="mt-2 flex flex-col gap-2 sm:flex-row">
       <Button size="sm" @click="saveConfig">
-        保存
+        {{ t('common.save') }}
       </Button>
       <Button size="sm" variant="ghost" @click="clearConfig">
-        清空
+        {{ t('common.clear') }}
       </Button>
       <Button
         size="sm"
@@ -232,11 +224,10 @@ async function testConnection() {
         :disabled="loading"
         @click="testConnection"
       >
-        {{ loading ? '测试中...' : '测试连接' }}
+        {{ loading ? t('common.testing') : t('common.testConnection') }}
       </Button>
     </div>
 
-    <!-- 测试结果显示 -->
     <div v-if="testResult" class="mt-1 text-xs text-gray-500">
       {{ testResult }}
     </div>
@@ -250,7 +241,6 @@ async function testConnection() {
   width: 6px;
 }
 @media (pointer: coarse) {
-  /* 触屏设备更细 */
   .custom-scroll::-webkit-scrollbar {
     width: 3px;
   }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Pause, Settings, Wand2, X } from 'lucide-vue-next'
+import { Pause, Settings, Wand2, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -15,10 +15,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { buildAIHeaders, resolveEndpointUrl, useAIFetch } from '@/composables/useAIFetch'
 import useAIConfigStore from '@/stores/aiConfig'
 import { useEditorStore } from '@/stores/editor'
 
-/* -------------------- props / emits -------------------- */
 const props = defineProps<{
   open: boolean
   selectedText: string
@@ -26,25 +26,21 @@ const props = defineProps<{
 }>()
 const emit = defineEmits([`update:open`])
 
-/* -------------------- reactive state -------------------- */
 const configVisible = ref(false)
 const dialogVisible = ref(props.open)
 const message = ref(``)
-const loading = ref(false)
-const abortController = ref<AbortController | null>(null)
+const { loading, abort: abortAI, fetchSSE } = useAIFetch()
 const customPrompts = ref<string[]>([])
 const hasResult = ref(false)
 const selectedAction = ref<
-  `optimize` | `summarize` | `spellcheck` | `translate-zh` | `translate-en` | `custom`
+  `optimize` | `summarize` | `spellcheck` | `translate-zh` | `translate-en` | `expand` | `continue` | `custom`
 >(`optimize`)
 const currentText = ref(``)
 const error = ref(``)
 
-/* -------------------- store & refs -------------------- */
 const editorStore = useEditorStore()
 const resultContainer = ref<HTMLElement | null>(null)
 
-/* -------------------- dialog state sync -------------------- */
 watch(() => props.open, (val) => {
   dialogVisible.value = val
   if (val && props.selectedText.trim()) {
@@ -54,48 +50,56 @@ watch(() => props.open, (val) => {
 })
 watch(dialogVisible, val => emit(`update:open`, val))
 
-/* -------------------- AI config -------------------- */
 const AIConfigStore = useAIConfigStore()
 const { apiKey, endpoint, model, temperature, maxToken, type }
   = storeToRefs(AIConfigStore)
+const { t } = useI18n()
 
-/* -------------------- action options -------------------- */
 interface ActionOption {
   value: string
   label: string
   defaultPrompt: string
 }
 
-const actionOptions: ActionOption[] = [
+const actionOptions = computed<ActionOption[]>(() => [
   {
     value: `optimize`,
-    label: `优化文本`,
-    defaultPrompt: `请优化文本，使其更通顺易读。`,
+    label: t('ai.toolbox.actions.optimize.label'),
+    defaultPrompt: t('ai.toolbox.actions.optimize.prompt'),
   },
   {
     value: `summarize`,
-    label: `文章总结`,
-    defaultPrompt: `请对文本进行摘要，输出主要观点和结论。`,
+    label: t('ai.toolbox.actions.summarize.label'),
+    defaultPrompt: t('ai.toolbox.actions.summarize.prompt'),
   },
   {
     value: `spellcheck`,
-    label: `错别字纠正`,
-    defaultPrompt: `请找出并纠正文本中的错别字、标点和语法错误。`,
+    label: t('ai.toolbox.actions.spellcheck.label'),
+    defaultPrompt: t('ai.toolbox.actions.spellcheck.prompt'),
   },
   {
     value: `translate-zh`,
-    label: `翻译为中文`,
-    defaultPrompt: `请将文本翻译为地道的中文。`,
+    label: t('ai.toolbox.actions.translateZh.label'),
+    defaultPrompt: t('ai.toolbox.actions.translateZh.prompt'),
   },
   {
     value: `translate-en`,
-    label: `翻译为英文`,
-    defaultPrompt: `请将文本翻译为自然流畅的英文。`,
+    label: t('ai.toolbox.actions.translateEn.label'),
+    defaultPrompt: t('ai.toolbox.actions.translateEn.prompt'),
   },
-  { value: `custom`, label: `自定义`, defaultPrompt: `` },
-]
+  {
+    value: `expand`,
+    label: t('ai.toolbox.actions.expand.label'),
+    defaultPrompt: t('ai.toolbox.actions.expand.prompt'),
+  },
+  {
+    value: `continue`,
+    label: t('ai.toolbox.actions.continue.label'),
+    defaultPrompt: t('ai.toolbox.actions.continue.prompt'),
+  },
+  { value: `custom`, label: t('ai.toolbox.actions.custom.label'), defaultPrompt: `` },
+])
 
-/* -------------------- watchers -------------------- */
 watch(message, async () => {
   await nextTick()
   resultContainer.value?.scrollTo({ top: resultContainer.value.scrollHeight })
@@ -106,7 +110,6 @@ watch(selectedAction, (val) => {
     customPrompts.value = []
 })
 
-// 当 dialogVisible 且 props.selectedText 变更时，更新原文并重置状态
 watch(
   () => props.selectedText,
   (val) => {
@@ -117,7 +120,6 @@ watch(
   },
 )
 
-/* -------------------- prompt handlers -------------------- */
 function addPrompt(e: KeyboardEvent) {
   const input = e.target as HTMLInputElement
   const prompt = input.value.trim()
@@ -137,11 +139,9 @@ function resetState() {
   hasResult.value = false
   error.value = ``
 
-  abortController.value?.abort()
-  abortController.value = null
+  abortAI()
 }
 
-/* -------------------- AI call -------------------- */
 async function runAIAction() {
   const text = currentText.value.trim()
   if (!text || loading.value)
@@ -149,24 +149,22 @@ async function runAIAction() {
 
   resetState()
   loading.value = true
-  abortController.value = new AbortController()
 
-  const systemPrompt
-    = `你是一名专业的多语言文本助手，请根据用户的指令处理下列内容。在输出时，不要输出任何额外的信息，只输出处理后的文本。`
-  const picked = actionOptions.find(o => o.value === selectedAction.value)!
+  const systemPrompt = t('ai.toolbox.systemPrompt')
+  const picked = actionOptions.value.find(o => o.value === selectedAction.value)!
   const parts: string[] = []
 
   if (picked.defaultPrompt)
     parts.push(picked.defaultPrompt)
   if (customPrompts.value.length)
-    parts.push(`请同时满足以下要求：${customPrompts.value.join(`、`)}。`)
+    parts.push(t('ai.toolbox.satisfyRequirements', { requirements: customPrompts.value.join(`、`) }))
   if (!parts.length)
-    parts.push(`请根据最佳实践优化文本。`)
+    parts.push(t('ai.toolbox.optimizeDefault'))
 
   const userCommand = parts.join(` `)
   const messages = [
     { role: `system`, content: systemPrompt },
-    { role: `user`, content: `${userCommand}\n\n待处理文本：\n${text}` },
+    { role: `user`, content: `${userCommand}\n\n${t('ai.toolbox.textToProcess', { text })}` },
   ]
 
   const payload = {
@@ -177,86 +175,36 @@ async function runAIAction() {
     stream: true,
   }
 
-  const headers: Record<string, string> = {
-    'Content-Type': `application/json`,
-  }
-  if (apiKey.value && type.value !== `default`) {
-    headers.Authorization = `Bearer ${apiKey.value}`
-  }
+  const headers = buildAIHeaders(apiKey.value, type.value)
+  const url = resolveEndpointUrl(endpoint.value, `chat`)
 
   try {
-    const url = new URL(endpoint.value)
-    if (!url.pathname.endsWith(`/chat/completions`)) {
-      url.pathname = url.pathname.replace(/\/?$/, `/chat/completions`)
-    }
-
-    const res = await window.fetch(url.toString(), {
-      method: `POST`,
-      headers,
-      body: JSON.stringify(payload),
-      signal: abortController.value!.signal,
-    })
-
-    if (!res.ok || !res.body)
-      throw new Error(`响应错误：${res.status}`)
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder(`utf-8`)
-    let buffer = ``
-
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done)
-        break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split(`\n`)
-      buffer = lines.pop() || ``
-
-      for (const line of lines) {
-        if (!line.trim() || line.trim() === `data: [DONE]`)
-          continue
-        try {
-          const json = JSON.parse(line.replace(/^data: /, ``))
-          const delta = json.choices?.[0]?.delta?.content
-          if (delta?.trim()) {
-            message.value += delta
-            hasResult.value = true
-          }
+    await fetchSSE(url, headers, payload, {
+      onDelta(content) {
+        if (content.trim()) {
+          message.value += content
+          hasResult.value = true
         }
-        catch {}
-      }
-    }
+      },
+    })
   }
   catch (e: any) {
-    if (e.name === `AbortError`) {
-      console.log(`Request aborted by user.`)
-    }
-    else {
-      console.error(`请求失败：`, e)
-      error.value = e.message || `请求失败`
-    }
-  }
-  finally {
-    loading.value = false
+    console.error(`请求失败：`, e)
+    error.value = e.message || t('ai.toolbox.requestFailed')
   }
 }
 
-/* -------------------- abort handler -------------------- */
 function stopAI() {
-  if (loading.value && abortController.value) {
-    abortController.value.abort()
-    loading.value = false
+  if (loading.value) {
+    abortAI()
   }
 }
 
-/* -------------------- actions -------------------- */
 function replaceText() {
   const editorView = toRaw(editorStore.editor!)!
   const selection = editorView.state.selection.main
   editorView.dispatch(editorView.state.replaceSelection(message.value))
 
-  // 选中替换后的文本
   const newSelection = editorView.state.selection.main
   editorView.dispatch({
     selection: { anchor: selection.from, head: newSelection.head },
@@ -286,14 +234,13 @@ defineExpose({ dialogVisible, runAIAction, replaceText, show, close, stopAI })
     <DialogContent
       class="bg-card text-card-foreground flex flex-col w-[95vw] max-h-[90vh] sm:max-h-[85vh] sm:max-w-2xl overflow-hidden p-0"
     >
-      <!-- ============ 头部 ============ -->
       <DialogHeader class="space-y-1 flex flex-col items-start px-6 pt-6 pb-4">
         <div class="space-x-1 flex items-center">
-          <DialogTitle>AI 工具箱</DialogTitle>
+          <DialogTitle>{{ t('ai.toolbox.title') }}</DialogTitle>
 
           <Button
-            :title="configVisible ? 'AI 工具箱' : '配置参数'"
-            :aria-label="configVisible ? 'AI 工具箱' : '配置参数'"
+            :title="configVisible ? t('ai.toolbox.title') : t('ai.chat.configParams')"
+            :aria-label="configVisible ? t('ai.toolbox.title') : t('ai.chat.configParams')"
             variant="ghost"
             size="icon"
             @click="configVisible = !configVisible"
@@ -304,24 +251,20 @@ defineExpose({ dialogVisible, runAIAction, replaceText, show, close, stopAI })
         </div>
       </DialogHeader>
 
-      <!-- ============ 内容区域 ============ -->
-      <!-- config panel -->
       <AIConfig
         v-if="configVisible"
         class="border-border mx-6 mb-4 w-auto border rounded-md p-4"
         @saved="() => (configVisible = false)"
       />
 
-      <!-- main content -->
       <div v-else class="custom-scroll space-y-3 flex-1 overflow-y-auto px-6 pb-3">
-        <!-- action selector -->
         <div>
           <div class="mb-1.5 text-sm font-medium">
-            选择操作
+            {{ t('ai.toolbox.selectAction') }}
           </div>
           <Select v-model="selectedAction">
             <SelectTrigger class="w-full">
-              <SelectValue placeholder="请选择要执行的操作" />
+              <SelectValue :placeholder="t('ai.toolbox.selectActionPlaceholder')" />
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
@@ -337,10 +280,9 @@ defineExpose({ dialogVisible, runAIAction, replaceText, show, close, stopAI })
           </Select>
         </div>
 
-        <!-- original text -->
         <div>
           <div class="mb-1.5 text-sm font-medium">
-            原文
+            {{ t('ai.toolbox.originalText') }}
           </div>
           <div
             class="border-border custom-scroll bg-muted/20 text-muted-foreground max-h-32 overflow-y-auto whitespace-pre-line border rounded px-3 py-2 text-sm"
@@ -349,10 +291,9 @@ defineExpose({ dialogVisible, runAIAction, replaceText, show, close, stopAI })
           </div>
         </div>
 
-        <!-- custom prompts -->
         <div v-if="selectedAction === 'custom'">
           <div class="mb-1.5 text-sm font-medium">
-            自定义提示词（可选）
+            {{ t('ai.toolbox.customPrompt') }}
           </div>
           <div
             class="custom-scroll border-border max-h-24 min-h-[40px] flex flex-wrap gap-2 overflow-y-auto border rounded px-2 py-1"
@@ -363,7 +304,10 @@ defineExpose({ dialogVisible, runAIAction, replaceText, show, close, stopAI })
               >
                 <span>{{ prompt }}</span>
                 <button
+                  type="button"
                   class="hover:bg-muted/60 h-4 w-4 flex items-center justify-center rounded-full"
+                  :aria-label="t('common.delete')"
+                  :title="t('common.delete')"
                   @click="removePrompt(index)"
                 >
                   <X class="h-3 w-3" />
@@ -372,21 +316,19 @@ defineExpose({ dialogVisible, runAIAction, replaceText, show, close, stopAI })
             </template>
             <input
               class="min-w-[100px] flex-1 bg-transparent py-1 text-sm focus:outline-hidden"
-              placeholder="输入提示词后按回车"
+              :placeholder="t('ai.toolbox.customPromptPlaceholder')"
               @keydown.enter="addPrompt"
             >
           </div>
         </div>
 
-        <!-- error -->
         <div v-if="error" class="min-h-[20px] flex items-center text-xs text-red-500">
           {{ error }}
         </div>
 
-        <!-- result -->
         <div v-if="message">
           <div class="mb-1.5 text-sm font-medium">
-            处理结果
+            {{ t('ai.toolbox.result') }}
           </div>
           <div
             ref="resultContainer"
@@ -397,17 +339,16 @@ defineExpose({ dialogVisible, runAIAction, replaceText, show, close, stopAI })
         </div>
       </div>
 
-      <!-- ============ 底部按钮 ============ -->
       <div v-if="!configVisible" class="flex justify-end gap-2 px-6 py-3.5 mt-auto">
         <Button v-if="loading" variant="secondary" @click="stopAI">
-          <Pause class="mr-1 h-4 w-4" /> 终止
+          <Pause class="mr-1 h-4 w-4" /> {{ t('ai.toolbox.stop') }}
         </Button>
         <Button
           v-if="hasResult && !loading"
           variant="default"
           @click="replaceText"
         >
-          接受
+          {{ t('ai.toolbox.accept') }}
         </Button>
         <Button
           v-if="!loading"
@@ -415,7 +356,7 @@ defineExpose({ dialogVisible, runAIAction, replaceText, show, close, stopAI })
           :disabled="!hasResult && !!message"
           @click="runAIAction"
         >
-          {{ hasResult ? '重试' : 'AI 处理' }}
+          {{ hasResult ? t('ai.toolbox.retry') : t('ai.toolbox.process') }}
         </Button>
       </div>
     </DialogContent>

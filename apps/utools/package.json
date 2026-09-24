@@ -1,3 +1,5 @@
 {
-  "type": "commonjs"
+  "name": "@md/utools",
+  "type": "commonjs",
+  "private": true
 }

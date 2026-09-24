@@ -1,22 +1,83 @@
-import type { MarkedExtension } from 'marked'
+import type { DiagramMessages } from '@md/shared/types'
+import type { MarkedExtension, Token } from 'marked'
+import type { MermaidToken } from '../types/marked-tokens'
+import type { DiagramThemeMode } from './diagram-theme'
+import { asDiagramToken, asTextTokenRenderer, isCodeToken } from '../types/marked-tokens'
+import {
+  diagramStateAttr,
+  formatDiagramMessage,
+  MD_DIAGRAM_STATE,
+  MD_DIAGRAM_STATE_ATTR,
+  resolveDiagramMessages,
+} from '../utils/asyncDiagramState'
 import { simpleHash } from '../utils/basicHelpers'
+import { blockScanLimit, findAtLineStart } from '../utils/scan'
+import { createSVGCache } from '../utils/svgCache'
+import { diagramCacheThemeSuffix, getMermaidThemeConfig } from './diagram-theme'
 
-// key -> svg
-const svgCache = new Map<string, string>()
-// 上一次渲染的结果（用于在新渲染完成前显示旧图片）
-let lastRenderedSvg: string | null = null
+let initPromise: Promise<typeof import('mermaid')['default']> | null = null
 
-function renderMermaid(id: string, code: string, cacheKey: string) {
-  if (typeof window === 'undefined')
+interface MermaidOptions {
+  themeMode?: DiagramThemeMode
+  diagramMessages?: DiagramMessages
+}
+
+type MermaidOptionsSource = MermaidOptions | (() => MermaidOptions | undefined)
+
+let optionsSource: MermaidOptionsSource | undefined
+
+function resolveOptions(): MermaidOptions | undefined {
+  return typeof optionsSource === `function` ? optionsSource() : optionsSource
+}
+
+function getDiagramMessages(): DiagramMessages {
+  return resolveDiagramMessages(resolveOptions()?.diagramMessages)
+}
+
+export async function initializeMermaid() {
+  return getMermaid()
+}
+
+function getMermaid() {
+  if (!initPromise) {
+    initPromise = import('mermaid').then((m) => {
+      m.default.initialize(getMermaidThemeConfig())
+      return m.default
+    })
+  }
+  return initPromise
+}
+
+function buildCacheKey(code: string, themeMode?: DiagramThemeMode): string {
+  return simpleHash(`${code}-${diagramCacheThemeSuffix(themeMode)}`)
+}
+
+const svgCache = createSVGCache(50)
+
+async function renderMermaidSvg(code: string, themeMode?: DiagramThemeMode): Promise<string> {
+  const cacheKey = buildCacheKey(code, themeMode)
+  const cached = svgCache.get(cacheKey)
+  if (cached)
+    return cached
+
+  const mermaid = await getMermaid()
+  mermaid.initialize(getMermaidThemeConfig(themeMode))
+  const result = await mermaid.render(`mermaid-svg-${cacheKey}`, code)
+  svgCache.set(cacheKey, result.svg)
+  return result.svg
+}
+
+function renderMermaid(id: string, code: string, cacheKey: string, themeMode?: DiagramThemeMode) {
+  if (typeof window === `undefined`)
     return
 
   const handleResult = (svg: string) => {
     svgCache.set(cacheKey, svg)
-    lastRenderedSvg = svg
 
     const el = document.getElementById(id)
     if (el) {
       el.innerHTML = svg
+      el.setAttribute(MD_DIAGRAM_STATE_ATTR, MD_DIAGRAM_STATE.ready)
     }
   }
 
@@ -24,27 +85,20 @@ function renderMermaid(id: string, code: string, cacheKey: string) {
     console.error('Failed to render Mermaid:', error)
     const el = document.getElementById(id)
     if (el) {
-      el.innerHTML = `<div style="color: red; padding: 10px; border: 1px solid red;">Mermaid 渲染失败: ${error instanceof Error ? error.message : String(error)}</div>`
+      const detail = error instanceof Error ? error.message : String(error)
+      const messages = getDiagramMessages()
+      el.innerHTML = `<div style="color: red; padding: 10px; border: 1px solid red;">${formatDiagramMessage(messages.mermaidError, detail)}</div>`
+      el.setAttribute(MD_DIAGRAM_STATE_ATTR, MD_DIAGRAM_STATE.error)
     }
   }
 
-  // 优先使用全局 CDN 的 mermaid
-  if ((window as any).mermaid) {
-    const mermaid = (window as any).mermaid
-    mermaid.render(`mermaid-svg-${cacheKey}`, code)
-      .then((result: { svg: string }) => handleResult(result.svg))
-      .catch(handleError)
-  }
-  else {
-    // 回退到动态导入（开发环境）
-    import('mermaid')
-      .then(mermaid => mermaid.default.render(`mermaid-svg-${cacheKey}`, code))
-      .then((result: { svg: string }) => handleResult(result.svg))
-      .catch(handleError)
-  }
+  void renderMermaidSvg(code, themeMode)
+    .then(handleResult)
+    .catch(handleError)
 }
 
-export function markedMermaid(): MarkedExtension {
+export function markedMermaid(options?: MermaidOptionsSource): MarkedExtension {
+  optionsSource = options
   const className = 'mermaid-diagram'
 
   return {
@@ -53,7 +107,7 @@ export function markedMermaid(): MarkedExtension {
         name: 'mermaid',
         level: 'block',
         start(src: string) {
-          return src.match(/^```mermaid/m)?.index
+          return findAtLineStart(src, '```mermaid', blockScanLimit(src))
         },
         tokenizer(src: string) {
           const match = /^```mermaid\r?\n([\s\S]*?)\r?\n```/.exec(src)
@@ -65,32 +119,28 @@ export function markedMermaid(): MarkedExtension {
             }
           }
         },
-        renderer(token: any) {
+        renderer: asTextTokenRenderer((token: MermaidToken) => {
           const code = token.text
-          const cacheKey = simpleHash(code)
+          const currentOptions = resolveOptions()
+          const themeMode = currentOptions?.themeMode
+          const cacheKey = buildCacheKey(code, themeMode)
 
-          // 有缓存直接返回
           const cached = svgCache.get(cacheKey)
           if (cached) {
             return `<!--mermaid-start--><div class="${className}">${cached}</div><!--mermaid-end-->`
           }
 
-          // 没有缓存，触发渲染
           const id = `mermaid-${cacheKey}`
-          renderMermaid(id, code, cacheKey)
+          renderMermaid(id, code, cacheKey, themeMode)
 
-          // 如果有上一次渲染的结果，显示旧图片；否则显示占位符
-          if (lastRenderedSvg) {
-            return `<!--mermaid-start--><div id="${id}" class="${className}">${lastRenderedSvg}</div><!--mermaid-end-->`
-          }
-
-          return `<!--mermaid-start--><div id="${id}" class="${className}">正在加载 Mermaid...</div><!--mermaid-end-->`
-        },
+          const messages = getDiagramMessages()
+          return `<!--mermaid-start--><div id="${id}" class="${className}" ${diagramStateAttr(MD_DIAGRAM_STATE.loading)}>${messages.mermaidLoading}</div><!--mermaid-end-->`
+        }),
       },
     ],
-    walkTokens(token: any) {
-      if (token.type === 'code' && token.lang === 'mermaid') {
-        token.type = 'mermaid'
+    walkTokens(token: Token) {
+      if (isCodeToken(token) && token.lang === 'mermaid') {
+        asDiagramToken<MermaidToken>(token, 'mermaid')
       }
     },
   }

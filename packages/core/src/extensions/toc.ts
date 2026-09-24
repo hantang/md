@@ -1,19 +1,18 @@
 import type { MarkedExtension } from 'marked'
+import { blockScanLimit, findLineEquals } from '../utils/scan'
 
-/**
- * marked 插件：支持 [TOC] 语法，自动生成嵌套目录
- */
+/** marked extension: [TOC] syntax for nested table of contents */
 export function markedToc(): MarkedExtension {
   let headings: { text: string, depth: number, index: number }[] = []
 
-  let firstToken = true
-
   return {
-    walkTokens(token) {
-      if (firstToken) {
+    hooks: {
+      preprocess(markdown) {
         headings = []
-        firstToken = false
-      }
+        return markdown
+      },
+    },
+    walkTokens(token) {
       if (token.type === `heading`) {
         const text = token.text || ``
         const depth = token.depth || 1
@@ -26,9 +25,8 @@ export function markedToc(): MarkedExtension {
         name: `toc`,
         level: `block`,
         start(src) {
-          // 只匹配独立一行的 [TOC]，避免误伤
-          const match = src.match(/^\s*\[TOC\]\s*$/m)
-          return match ? match.index : undefined
+          // Match [TOC] on its own line only
+          return findLineEquals(src, `[TOC]`, blockScanLimit(src))
         },
         tokenizer(src) {
           const match = /^\[TOC\]/.exec(src)
@@ -40,11 +38,13 @@ export function markedToc(): MarkedExtension {
           }
         },
         renderer() {
-          if (!headings.length)
+          const tocHeadings = headings.filter(h => h.depth !== 1)
+          if (!tocHeadings.length)
             return ``
-          let html = `<nav class="markdown-toc"><ul class="toc-ul toc-level-1 pl-4 border-l ml-2">`
-          let lastDepth = 1
-          headings.forEach(({ text, depth, index }) => {
+          const minDepth = Math.min(...tocHeadings.map(h => h.depth))
+          let html = `<nav class="markdown-toc"><ul class="toc-ul toc-level-${minDepth} pl-4 border-l ml-2">`
+          let lastDepth = minDepth
+          tocHeadings.forEach(({ text, depth, index }) => {
             if (depth > lastDepth) {
               for (let i = lastDepth + 1; i <= depth; i++) {
                 html += `<ul class="toc-ul toc-level-${i} pl-4 border-l ml-2">`
@@ -65,7 +65,6 @@ export function markedToc(): MarkedExtension {
 
           html += `</ul></nav>`
 
-          firstToken = true
           return html
         },
       },

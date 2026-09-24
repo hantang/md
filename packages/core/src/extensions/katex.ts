@@ -1,76 +1,126 @@
+/// <reference path="../mathjax.d.ts" />
 import type { MarkedExtension } from 'marked'
+import type { KatexRenderFn, KatexToken } from '../types/marked-tokens'
+import { asKatexRenderer } from '../types/marked-tokens'
+import { escapeHtml } from '../utils/basicHelpers'
+import {
+  blockLatexRule,
+  findInlineKatexStart,
+  inlineLatexRule,
+  inlineRule,
+  inlineRuleNonStandard,
+  matchBlockKatex,
+} from '../utils/mathDetection'
+import { ensureMathJaxLoaded, isMathJaxReady } from '../utils/mathjax'
+import { blockScanLimit, findIndentedLineStart } from '../utils/scan'
+import { LRUMap } from '../utils/svgCache'
 
 export interface MarkedKatexOptions {
   nonStandard?: boolean
+  /** Locale-aware loading placeholder; falls back to English */
+  getKatexLoadingMessage?: () => string | undefined
 }
 
-const inlineRule = /^(\${1,2})(?!\$)((?:\\.|[^\\\n])*?(?:\\.|[^\\\n$]))\1(?=[\s?!.,:？！。，：]|$)/
-const inlineRuleNonStandard = /^(\${1,2})(?!\$)((?:\\.|[^\\\n])*?(?:\\.|[^\\\n$]))\1/ // Non-standard, even if there are no spaces before and after $ or $$, try to parse
+const DEFAULT_KATEX_LOADING = `Loading formula…`
 
-const blockRule = /^\s{0,3}(\${1,2})[ \t]*\n([\s\S]+?)\n\s{0,3}\1[ \t]*(?:\n|$)/
+/**
+ * tex2svg is a full synchronous typeset per formula. The preview re-renders the
+ * whole document on every keystroke batch, so a formula-heavy article would
+ * otherwise re-typeset every untouched formula each time. Only settled output is
+ * cached — pending placeholders must stay uncached so they resolve once MathJax
+ * finishes loading.
+ */
+const mathSvgCache = new LRUMap<string>(400)
 
-// LaTeX style rules for \( ... \) and \[ ... \]
-const inlineLatexRule = /^\\\(([^\\]*(?:\\.[^\\]*)*?)\\\)/
-const blockLatexRule = /^\\\[([^\\]*(?:\\.[^\\]*)*?)\\\]/
+/** Drop memoized formula SVG (exported for tests and MathJax reloads). */
+export function clearMathSvgCache(): void {
+  mathSvgCache.clear()
+}
 
-function createRenderer(defaultDisplay: boolean, withStyle: boolean = true) {
-  return (token: any) => {
+let mathJaxLoadRequested = false
+
+function requestMathJaxLoad() {
+  if (isMathJaxReady())
+    return
+  if (mathJaxLoadRequested)
+    return
+
+  mathJaxLoadRequested = true
+  ensureMathJaxLoaded()
+    .catch((error) => {
+      mathJaxLoadRequested = false
+      console.error(error)
+    })
+}
+
+function createRenderer(
+  defaultDisplay: boolean,
+  withStyle: boolean = true,
+  getKatexLoadingMessage?: () => string | undefined,
+): KatexRenderFn {
+  return (token: KatexToken) => {
     const display = token.displayMode ?? defaultDisplay
+    const rawAttr = escapeHtml(token.raw ?? token.text)
+    const cacheKey = `${display ? `1` : `0`}\u0000${withStyle ? `1` : `0`}\u0000${rawAttr}\u0000${token.text}`
 
-    // @ts-expect-error MathJax is a global variable
+    const cached = mathSvgCache.get(cacheKey)
+    if (cached !== undefined) {
+      return cached
+    }
+
+    if (typeof window === `undefined` || !isMathJaxReady()) {
+      requestMathJaxLoad()
+
+      if (display) {
+        const loading = getKatexLoadingMessage?.() || DEFAULT_KATEX_LOADING
+        return `<section class="katex-block katex-pending" data-math-display="true" data-math-raw="${rawAttr}"><span>${escapeHtml(loading)}</span></section>`
+      }
+
+      return `<span class="katex-inline katex-pending" data-math-display="false" data-math-raw="${rawAttr}"><span>…</span></span>`
+    }
+
     window.MathJax.texReset()
-    // @ts-expect-error MathJax is a global variable
     const mjxContainer = window.MathJax.tex2svg(token.text, { display })
     const svg = mjxContainer.firstChild
     const width = svg.style[`min-width`] || svg.getAttribute(`width`)
     svg.removeAttribute(`width`)
 
-    // 行内公式对齐 https://groups.google.com/g/mathjax-users/c/zThKffrrCvE?pli=1
-    // 直接覆盖 style 会覆盖 MathJax 的样式，需要手动设置
-    // svg.style = `max-width: 300vw !important; display: initial; flex-shrink: 0;`
+    // Inline math vertical align: https://groups.google.com/g/mathjax-users/c/zThKffrrCvE?pli=1
+    // Set properties individually; assigning style overwrites MathJax defaults
 
     if (withStyle) {
       svg.style.display = `initial`
       svg.style.setProperty(`max-width`, `300vw`, `important`)
       svg.style.flexShrink = `0`
-      svg.style.width = width
+      svg.style.width = width || ``
     }
 
-    if (!display) {
-      // 新主题系统：使用 class 而非内联样式
-      return `<span class="katex-inline">${svg.outerHTML}</span>`
+    const firstG = svg.querySelector(`g`)
+    if (firstG) {
+      // Inline style + attributes: WeChat reader dark mode follows currentColor with text
+      firstG.style.fill = `currentColor`
+      firstG.style.stroke = `currentColor`
+      firstG.setAttribute(`fill`, `currentColor`)
+      firstG.setAttribute(`stroke`, `currentColor`)
     }
 
-    return `<section class="katex-block">${svg.outerHTML}</section>`
+    const html = display
+      ? `<section class="katex-block" data-math-display="true" data-math-raw="${rawAttr}">${svg.outerHTML}</section>`
+      : `<span class="katex-inline" data-math-display="false" data-math-raw="${rawAttr}">${svg.outerHTML}</span>`
+
+    mathSvgCache.set(cacheKey, html)
+    return html
   }
 }
 
-function inlineKatex(options: MarkedKatexOptions | undefined, renderer: any) {
+function inlineKatex(options: MarkedKatexOptions | undefined, renderer: KatexRenderFn) {
   const nonStandard = options && options.nonStandard
   const ruleReg = nonStandard ? inlineRuleNonStandard : inlineRule
   return {
     name: `inlineKatex`,
-    level: `inline`,
+    level: `inline` as const,
     start(src: string) {
-      let index
-      let indexSrc = src
-
-      while (indexSrc) {
-        index = indexSrc.indexOf(`$`)
-        if (index === -1) {
-          return
-        }
-        const f = nonStandard ? index > -1 : index === 0 || indexSrc.charAt(index - 1) === ` `
-        if (f) {
-          const possibleKatex = indexSrc.substring(index)
-
-          if (possibleKatex.match(ruleReg)) {
-            return index
-          }
-        }
-
-        indexSrc = indexSrc.substring(index + 1).replace(/^\$+/, ``)
-      }
+      return findInlineKatexStart(src, !!nonStandard, ruleReg)
     },
     tokenizer(src: string) {
       const match = src.match(ruleReg)
@@ -83,16 +133,19 @@ function inlineKatex(options: MarkedKatexOptions | undefined, renderer: any) {
         }
       }
     },
-    renderer,
+    renderer: asKatexRenderer(renderer),
   }
 }
 
-function blockKatex(_options: MarkedKatexOptions | undefined, renderer: any) {
+function blockKatex(_options: MarkedKatexOptions | undefined, renderer: KatexRenderFn) {
   return {
     name: `blockKatex`,
-    level: `block`,
+    level: `block` as const,
+    start(src: string) {
+      return findIndentedLineStart(src, `$$`, 3, blockScanLimit(src))
+    },
     tokenizer(src: string) {
-      const match = src.match(blockRule)
+      const match = matchBlockKatex(src)
       if (match) {
         return {
           type: `blockKatex`,
@@ -102,14 +155,14 @@ function blockKatex(_options: MarkedKatexOptions | undefined, renderer: any) {
         }
       }
     },
-    renderer,
+    renderer: asKatexRenderer(renderer),
   }
 }
 
-function inlineLatexKatex(_options: MarkedKatexOptions | undefined, renderer: any) {
+function inlineLatexKatex(_options: MarkedKatexOptions | undefined, renderer: KatexRenderFn) {
   return {
     name: `inlineLatexKatex`,
-    level: `inline`,
+    level: `inline` as const,
     start(src: string) {
       const index = src.indexOf(`\\(`)
       return index !== -1 ? index : undefined
@@ -125,14 +178,14 @@ function inlineLatexKatex(_options: MarkedKatexOptions | undefined, renderer: an
         }
       }
     },
-    renderer,
+    renderer: asKatexRenderer(renderer),
   }
 }
 
-function blockLatexKatex(_options: MarkedKatexOptions | undefined, renderer: any) {
+function blockLatexKatex(_options: MarkedKatexOptions | undefined, renderer: KatexRenderFn) {
   return {
     name: `blockLatexKatex`,
-    level: `block`,
+    level: `block` as const,
     start(src: string) {
       const index = src.indexOf(`\\[`)
       return index !== -1 ? index : undefined
@@ -148,17 +201,18 @@ function blockLatexKatex(_options: MarkedKatexOptions | undefined, renderer: any
         }
       }
     },
-    renderer,
+    renderer: asKatexRenderer(renderer),
   }
 }
 
 export function MDKatex(options: MarkedKatexOptions | undefined, withStyle: boolean = true): MarkedExtension {
+  const getLoading = options?.getKatexLoadingMessage
   return {
     extensions: [
-      inlineKatex(options, createRenderer(false, withStyle)),
-      blockKatex(options, createRenderer(true, withStyle)),
-      inlineLatexKatex(options, createRenderer(false, withStyle)),
-      blockLatexKatex(options, createRenderer(true, withStyle)),
+      inlineKatex(options, createRenderer(false, withStyle, getLoading)),
+      blockKatex(options, createRenderer(true, withStyle, getLoading)),
+      inlineLatexKatex(options, createRenderer(false, withStyle, getLoading)),
+      blockLatexKatex(options, createRenderer(true, withStyle, getLoading)),
     ],
   }
 }

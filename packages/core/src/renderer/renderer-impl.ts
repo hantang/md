@@ -1,12 +1,16 @@
-import type { IOpts, RendererAPI } from '@md/shared/types'
+import type { CollectedHeading, IOpts, RendererAPI } from '@md/shared/types'
+import type { FrontMatterData } from '@md/shared/types/front-matter'
+import type { ReadTimeResults } from '@md/shared/utils/readingTime'
 import type { RendererObject, Tokens } from 'marked'
-import type { ReadTimeResults } from 'reading-time'
-import frontMatter from 'front-matter'
+import readingTime from '@md/shared/utils/readingTime'
+import { decodeHTML } from 'entities'
 import hljs from 'highlight.js/lib/core'
-import { marked } from 'marked'
-import readingTime from 'reading-time'
+import { Marked } from 'marked'
 import {
+  getBuiltInRegistry,
   markedAlert,
+  markedComponent,
+  markedEmoji,
   markedFootnotes,
   markedInfographic,
   markedMarkup,
@@ -17,6 +21,8 @@ import {
   markedToc,
   MDKatex,
 } from '../extensions'
+import { escapeHtml } from '../utils/basicHelpers'
+import { parseFrontMatter } from '../utils/front-matter'
 import { COMMON_LANGUAGES, highlightAndFormatCode } from '../utils/languages'
 
 Object.entries(COMMON_LANGUAGES).forEach(([name, lang]) => {
@@ -25,23 +31,23 @@ Object.entries(COMMON_LANGUAGES).forEach(([name, lang]) => {
 
 export { hljs }
 
-marked.setOptions({
-  breaks: true,
-})
-marked.use(markedSlider())
+const DOUBLE_QUOTE_REGEX = /"/g
+const UNDERSCORE_REGEX = /_/g
+const HEADING_TAG_REGEX = /^h\d$/
+const HTML_TAG_REGEX = /<[^>]*>/g
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, `&amp;`) // 转义 &
-    .replace(/</g, `&lt;`) // 转义 <
-    .replace(/>/g, `&gt;`) // 转义 >
-    .replace(/"/g, `&quot;`) // 转义 "
-    .replace(/'/g, `&#39;`) // 转义 '
-    .replace(/`/g, `&#96;`) // 转义 `
+/** Plain text of inline heading HTML, mirroring what `textContent` would yield. */
+function stripInlineHtml(html: string): string {
+  // decodeHTML handles every named/numeric entity, matching DOM textContent.
+  return decodeHTML(html.replace(HTML_TAG_REGEX, ``))
 }
+const PARAGRAPH_WRAPPER_REGEX = /^<p(?:\s[^>]*)?>([\s\S]*?)<\/p>/
+const MP_WEIXIN_LINK_REGEX = /^https?:\/\/mp\.weixin\.qq\.com/
+/** Locale-neutral English fallbacks; Web injects localized strings via IOpts. */
+const DEFAULT_COUNT_SUMMARY = `{words} words, about {minutes} min read`
+const DEFAULT_FOOTNOTE_TITLE = `References`
 
-function buildAddition(): string {
-  return `
+const ADDITION_STYLE = `
     <style>
       .preview-wrapper pre::before {
         position: absolute;
@@ -57,7 +63,6 @@ function buildAddition(): string {
       }
     </style>
   `
-}
 
 function buildFootnoteArray(footnotes: [number, string, string][]): string {
   return footnotes
@@ -69,7 +74,19 @@ function buildFootnoteArray(footnotes: [number, string, string][]): string {
     .join(`\n`)
 }
 
-function transform(legend: string, text: string | null, title: string | null): string {
+function extractFileName(href: string): string {
+  try {
+    const urlPath = href.split('?')[0].split('#')[0]
+    const fileName = urlPath.split('/').pop() || ''
+    const nameWithoutExt = fileName.replace(/\.[^.]*$/, '')
+    return nameWithoutExt
+  }
+  catch {
+    return ''
+  }
+}
+
+function transform(legend: string, text: string | null, title: string | null, href: string = ''): string {
   const options = legend.split(`-`)
   for (const option of options) {
     if (option === `alt` && text) {
@@ -77,6 +94,12 @@ function transform(legend: string, text: string | null, title: string | null): s
     }
     if (option === `title` && title) {
       return title
+    }
+    if (option === `filename` && href) {
+      const fileName = extractFileName(href)
+      if (fileName) {
+        return escapeHtml(fileName)
+      }
     }
   }
   return ``
@@ -90,22 +113,70 @@ const macCodeSvg = `
   </svg>
 `.trim()
 
+/**
+ * Render diff-{lang} code blocks: + lines green (added), - lines red (deleted),
+ * other lines highlighted normally.
+ */
+function renderDiffCode(text: string, baseLang: string): string {
+  const isLangRegistered = hljs.getLanguage(baseLang)
+  const lang = isLangRegistered ? baseLang : `plaintext`
+
+  const lines = text.split(`\n`)
+  const prefixes = lines.map(line => line[0])
+  // Strip +/- prefixes and highlight once to avoid per-line hljs calls
+  const strippedLines = lines.map((line, i) => {
+    const p = prefixes[i]
+    return (p === `+` || p === `-`) ? line.slice(1) : line
+  })
+  const highlightedLines = isLangRegistered
+    ? hljs.highlight(strippedLines.join(`\n`), { language: lang }).value.split(`\n`)
+    : strippedLines.map(escapeHtml)
+
+  const rendered = lines
+    .map((_, i) => {
+      const prefix = prefixes[i]
+      const highlighted = highlightedLines[i] ?? ``
+      let bg: string
+      let sign: string
+
+      if (prefix === `+`) {
+        bg = `background:rgba(80,200,80,.18);`
+        sign = `<span style="color:#52c41a;user-select:none;">+</span>`
+      }
+      else if (prefix === `-`) {
+        bg = `background:rgba(255,80,80,.18);`
+        sign = `<span style="color:#ff4d4f;user-select:none;">-</span>`
+      }
+      else {
+        bg = ``
+        sign = `<span style="user-select:none;"> </span>`
+      }
+
+      return `<span style="display:block;${bg}">${sign}${highlighted}</span>`
+    })
+    .join(``)
+
+  const span = `<span class="mac-sign" style="padding: 10px 14px 0;">${macCodeSvg}</span>`
+  // Same -webkit-box wrapper as normal code blocks (see highlightAndFormatCode)
+  return `<pre class="hljs code__pre">${span}<code class="language-diff-${baseLang}"><span class="code-block__inner" style="display:block">${rendered}</span></code></pre>`
+}
+
 interface ParseResult {
-  yamlData: Record<string, any>
+  yamlData: FrontMatterData
   markdownContent: string
   readingTime: ReadTimeResults
 }
 
 function parseFrontMatterAndContent(markdownText: string): ParseResult {
   try {
-    const parsed = frontMatter(markdownText)
+    const parsed = parseFrontMatter(markdownText)
     const yamlData = parsed.attributes
     const markdownContent = parsed.body
 
     const readingTimeResult = readingTime(markdownContent)
 
     return {
-      yamlData: yamlData as Record<string, any>,
+      yamlData,
       markdownContent,
       readingTime: readingTimeResult,
     }
@@ -125,32 +196,35 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
   let footnoteIndex: number = 0
   const listOrderedStack: boolean[] = []
   const listCounters: number[] = []
+  const headings: CollectedHeading[] = []
+  const markdownParser = new Marked()
+
+  markdownParser.setOptions({
+    breaks: true,
+  })
 
   function getOpts(): IOpts {
     return opts
   }
 
-  /**
-   * 生成带 CSS 类的内容（新主题系统）
-   * @param styleLabel CSS 类名标识
-   * @param content 内容
-   * @param tagName HTML 标签名（可选）
-   */
-  function styledContent(styleLabel: string, content: string, tagName?: string): string {
+  function styledContent(styleLabel: string, content: string, tagName?: string, style?: string): string {
     const tag = tagName ?? styleLabel
-    const className = `${styleLabel.replace(/_/g, `-`)}`
-    const headingAttr = /^h\d$/.test(tag) ? ` data-heading="true"` : ``
-    return `<${tag} class="${className}"${headingAttr}>${content}</${tag}>`
+    const className = `${styleLabel.replace(UNDERSCORE_REGEX, `-`)}`
+    const isHeading = HEADING_TAG_REGEX.test(tag)
+    // Collect headings during render so consumers (outline/TOC) don't need a DOM pass.
+    if (isHeading)
+      headings.push({ level: Number(tag.slice(1)), text: stripInlineHtml(content) })
+    const headingAttr = isHeading ? ` data-heading="true"` : ``
+    const styleAttr = style ? ` style="${style}"` : ``
+    return `<${tag} class="${className}"${headingAttr}${styleAttr}>${content}</${tag}>`
   }
 
   function addFootnote(title: string, link: string): number {
-    // 检查是否已经存在相同的链接
     const existingFootnote = footnotes.find(([, , existingLink]) => existingLink === link)
     if (existingFootnote) {
-      return existingFootnote[0] // 返回已存在的脚注索引
+      return existingFootnote[0]
     }
 
-    // 如果不存在，创建新的脚注
     footnotes.push([++footnoteIndex, title, link])
     return footnoteIndex
   }
@@ -158,12 +232,23 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
   function reset(newOpts: Partial<IOpts>): void {
     footnotes.length = 0
     footnoteIndex = 0
+    listOrderedStack.length = 0
+    listCounters.length = 0
+    headings.length = 0
     setOptions(newOpts)
   }
 
   function setOptions(newOpts: Partial<IOpts>): void {
     opts = { ...opts, ...newOpts }
-    marked.use(markedInfographic({ themeMode: newOpts.themeMode }))
+  }
+
+  function formatCountSummary(words: number, minutes: number): string {
+    const template = opts.countMessages?.summary || DEFAULT_COUNT_SUMMARY
+    return template
+      .split(`{words}`)
+      .join(String(words))
+      .split(`{minutes}`)
+      .join(String(minutes))
   }
 
   function buildReadingTime(readingTime: ReadTimeResults): string {
@@ -173,9 +258,10 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
     if (!readingTime.words) {
       return ``
     }
+    const minutes = Math.ceil(readingTime.minutes)
     return `
       <blockquote class="md-blockquote">
-        <p class="md-blockquote-p">字数 ${readingTime?.words}，阅读大约需 ${Math.ceil(readingTime?.minutes)} 分钟</p>
+        <p class="md-blockquote-p">${formatCountSummary(readingTime.words, minutes)}</p>
       </blockquote>
     `
   }
@@ -185,8 +271,9 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
       return ``
     }
 
+    const footnoteTitle = opts.renderMessages?.footnoteTitle || DEFAULT_FOOTNOTE_TITLE
     return (
-      styledContent(`h4`, `引用链接`)
+      styledContent(`h4`, footnoteTitle)
       + styledContent(`footnotes`, buildFootnoteArray(footnotes), `p`)
     )
   }
@@ -202,7 +289,8 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
       const text = this.parser.parseInline(tokens)
       const isFigureImage = text.includes(`<figure`) && text.includes(`<img`)
       const isEmpty = text.trim() === ``
-      if (isFigureImage || isEmpty) {
+      const isKatexOnly = /^<section class="katex-block"[\s\S]*<\/section>\s*$/.test(text.trim())
+      if (isFigureImage || isEmpty || isKatexOnly) {
         return text
       }
       return styledContent(`p`, text)
@@ -210,22 +298,27 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
 
     blockquote({ tokens }: Tokens.Blockquote): string {
       const text = this.parser.parse(tokens)
-      // 新主题系统：blockquote 内的 p 标签由 CSS 选择器 `blockquote p` 控制
+      // Theme CSS targets blockquote p via `blockquote p`
       return styledContent(`blockquote`, text)
     },
 
     code({ text, lang = `` }: Tokens.Code): string {
       const langText = lang.split(` `)[0]
+
+      if (langText.startsWith(`diff-`)) {
+        return renderDiffCode(text, langText.slice(5))
+      }
+
       const isLanguageRegistered = hljs.getLanguage(langText)
       const language = isLanguageRegistered ? langText : `plaintext`
 
       const highlighted = highlightAndFormatCode(text, language, hljs, !!opts.isShowLineNumber)
 
       const span = `<span class="mac-sign" style="padding: 10px 14px 0;">${macCodeSvg}</span>`
-      // 如果语言未注册，添加 data-language-pending 属性和原始代码文本用于后续动态加载
+      // Defer highlighting until grammar loads from CDN
       let pendingAttr = ``
       if (!isLanguageRegistered && langText !== `plaintext`) {
-        const escapedText = text.replace(/"/g, `&quot;`)
+        const escapedText = text.replace(DOUBLE_QUOTE_REGEX, `&quot;`)
         pendingAttr = ` data-language-pending="${langText}" data-raw-code="${escapedText}" data-show-line-number="${opts.isShowLineNumber}"`
       }
       const code = `<code class="language-${lang}"${pendingAttr}>${highlighted}</code>`
@@ -255,19 +348,16 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
       )
     },
 
-    // 2. listitem：从栈顶取 ordered + counter，计算 prefix 并自增
     listitem(token: Tokens.ListItem) {
       const ordered = listOrderedStack[listOrderedStack.length - 1]
       const idx = listCounters[listCounters.length - 1]!
 
-      // 准备下一个
       listCounters[listCounters.length - 1] = idx + 1
 
       const prefix = ordered
         ? `${idx}. `
         : `• `
 
-      // 渲染内容：优先 inline，fallback 去掉 <p> 包裹
       let content: string
       try {
         content = this.parser.parseInline(token.tokens)
@@ -275,7 +365,7 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
       catch {
         content = this.parser
           .parse(token.tokens)
-          .replace(/^<p(?:\s[^>]*)?>([\s\S]*?)<\/p>/, `$1`)
+          .replace(PARAGRAPH_WRAPPER_REGEX, `$1`)
       }
 
       return styledContent(
@@ -286,15 +376,26 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
     },
 
     image({ href, title, text }: Tokens.Image): string {
-      const newText = opts.legend ? transform(opts.legend, text, title) : ``
+      let widthAttr = ``
+      let heightAttr = ``
+      let altText = text
+
+      const sizeMatch = text.match(/\|(\d+)(?:x(\d+))?$/)
+      if (sizeMatch) {
+        altText = text.replace(/\|(\d+)(?:x(\d+))?$/, ``)
+        widthAttr = sizeMatch[1] ? ` width="${sizeMatch[1]}"` : ``
+        heightAttr = sizeMatch[2] ? ` height="${sizeMatch[2]}"` : ``
+      }
+
+      const newText = opts.legend ? transform(opts.legend, altText, title, href) : ``
       const subText = newText ? styledContent(`figcaption`, newText) : ``
       const titleAttr = title ? ` title="${title}"` : ``
-      return `<figure><img src="${href}"${titleAttr} alt="${text}"/>${subText}</figure>`
+      return `<figure><img src="${href}"${titleAttr}${widthAttr}${heightAttr} alt="${altText}"/>${subText}</figure>`
     },
 
     link({ href, title, text, tokens }: Tokens.Link): string {
       const parsedText = this.parser.parseInline(tokens)
-      if (/^https?:\/\/mp\.weixin\.qq\.com/.test(href)) {
+      if (MP_WEIXIN_LINK_REGEX.test(href)) {
         return `<a href="${href}" title="${title || text}">${parsedText}</a>`
       }
       if (href === text) {
@@ -315,11 +416,15 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
       return styledContent(`em`, this.parser.parseInline(tokens))
     },
 
+    del({ tokens }: Tokens.Del): string {
+      return styledContent(`del`, this.parser.parseInline(tokens))
+    },
+
     table({ header, rows }: Tokens.Table): string {
       const headerRow = header
         .map((cell) => {
           const text = this.parser.parseInline(cell.tokens)
-          return styledContent(`th`, text)
+          return styledContent(`th`, text, undefined, `text-align: ${cell.align || `left`}`)
         })
         .join(``)
       const body = rows
@@ -331,7 +436,7 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
         })
         .join(``)
       return `
-        <section style="max-width: 100%; overflow: auto">
+        <section style="max-width: 100%; overflow: auto; -webkit-overflow-scrolling: touch">
           <table class="preview-table">
             <thead>${headerRow}</thead>
             <tbody>${body}</tbody>
@@ -342,39 +447,69 @@ export function initRenderer(opts: IOpts = {}): RendererAPI {
 
     tablecell(token: Tokens.TableCell): string {
       const text = this.parser.parseInline(token.tokens)
-      return styledContent(`td`, text)
+      return styledContent(`td`, text, undefined, `text-align: ${token.align || `left`}`)
     },
 
-    hr(_: Tokens.Hr): string {
-      return styledContent(`hr`, ``)
+    hr(token: Tokens.Hr): string {
+      const raw = token.raw.trim()
+      let variant = `dash`
+      if (raw.includes(`*`)) {
+        variant = `star`
+      }
+      else if (raw.includes(`_`)) {
+        variant = `underscore`
+      }
+      return `<hr class="hr hr-${variant}">`
     },
   }
 
-  marked.use({ renderer })
-  // 新主题系统：扩展不再需要 styles 参数
-  marked.use(markedMarkup())
-  marked.use(markedToc())
-  marked.use(markedSlider())
-  marked.use(markedAlert({}))
-  marked.use(MDKatex({ nonStandard: true }, true))
-  marked.use(markedFootnotes())
-  marked.use(markedMermaid())
-  marked.use(markedPlantUML({
-    inlineSvg: true, // 启用SVG内嵌，适用于微信公众号
+  markdownParser.use({ renderer })
+  // Registry getter via closure avoids global state
+  markdownParser.use(markedComponent(
+    () => opts.components ?? getBuiltInRegistry(),
+    () => opts.renderMessages,
+  ))
+  markdownParser.use(markedMarkup())
+  markdownParser.use(markedEmoji({
+    resolveUrl: id => opts.assetResolver?.(id) ?? `about:blank`,
   }))
-  marked.use(markedInfographic({ themeMode: opts.themeMode }))
-  marked.use(markedRuby())
+  markdownParser.use(markedToc())
+  markdownParser.use(markedSlider())
+  markdownParser.use(markedAlert({}))
+  markdownParser.use(MDKatex({
+    nonStandard: true,
+    getKatexLoadingMessage: () => opts.renderMessages?.katexLoading,
+  }, true))
+  markdownParser.use(markedFootnotes())
+  markdownParser.use(markedMermaid(() => ({
+    themeMode: opts.themeMode,
+    diagramMessages: opts.diagramMessages,
+  })))
+  markdownParser.use(markedPlantUML({
+    inlineSvg: true, // Inline SVG for WeChat (no external images)
+    getDiagramMessages: () => opts.diagramMessages,
+    getThemeMode: () => opts.themeMode,
+  }))
+  markdownParser.use(markedInfographic(() => ({
+    themeMode: opts.themeMode,
+    diagramMessages: opts.diagramMessages,
+  })))
+  markdownParser.use(markedRuby())
 
   return {
-    buildAddition,
+    buildAddition: () => ADDITION_STYLE,
     buildFootnotes,
     setOptions,
     reset,
     parseFrontMatterAndContent,
+    renderMarkdownToHtml(markdown: string) {
+      return markdownParser.parse(markdown) as string
+    },
     buildReadingTime,
     createContainer(content: string) {
       return styledContent(`container`, content, `section`)
     },
+    getHeadings: () => [...headings],
     getOpts,
   }
 }
